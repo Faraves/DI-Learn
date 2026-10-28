@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <title>DataDojo: Financial & ETL Optimizer | PWA Serverless</title>
+  <meta name="description" content="Entrenador algorítmico 100% Client-Side (DuckDB-Wasm + Pyodide + sqlglot) para Ingeniería de Datos Bancarios en PostgreSQL, Oracle SQL, Python Pandas, Power Query (M) y R." />
+  <meta name="theme-color" content="#0B0F17" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="DataDojo" />
+
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./assets/icons/icon-192.svg" />
+  <link rel="apple-touch-icon" href="./assets/icons/icon-192.svg" />
+
+  <!-- TailwindCSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            obsidian: '#0B0F17',
+            panel: '#111827'
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace']
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- CodeMirror 5 Lightweight Editor (SQL + Python + Dracula Dark Theme) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+
+  <style>
+    body {
+      background-color: #0B0F17;
+      color: #F8FAFC;
+    }
+    .CodeMirror {
+      font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      border-radius: 0.75rem;
+      border: 1px solid #1E293B;
+      background-color: #090D16 !important;
+    }
+    .CodeMirror-gutters {
+      background-color: #090D16 !important;
+      border-right: 1px solid #1E293B !important;
+    }
+    /* Custom subtle scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0B0F17;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-emerald-500/30 selection:text-emerald-200">
+
+  <!-- TOP HEADER BAR -->
+  <header class="sticky top-0 z-30 backdrop-blur-md bg-[#0B0F17]/90 border-b border-slate-800/80 px-4 py-3">
+    <div class="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-3">
+      <!-- Brand Identity -->
+      <div class="flex items-center gap-3">
+        <img src="./assets/icons/icon-192.svg" alt="DataDojo Logo" class="w-9 h-9 rounded-lg shadow-sm border border-emerald-500/30" />
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base sm:text-lg font-bold tracking-tight text-white">
+              DataDojo <span class="text-emerald-400 font-mono text-xs sm:text-sm font-normal">Financial &amp; ETL Optimizer</span>
+            </h1>
+            <span class="hidden md:inline-block px-2 py-0.5 text-[10px] font-mono uppercase rounded bg-slate-800 text-slate-300 border border-slate-700">
+              100% Client-Side WASM
+            </span>
+          </div>
+          <p class="text-[11px] text-slate-400 hidden sm:block">
+            PostgreSQL • Oracle SQL (sqlglot) • Python Pandas (tracemalloc) • Power Query (M) &amp; R • Obsidian Sync
+          </p>
+        </div>
+      </div>
+
+      <!-- Telemetry & Actions -->
+      <div class="flex flex-wrap items-center gap-2">
+        <div id="status-duckdb" class="px-2.5 py-1 rounded-full text-xs font-mono bg-slate-900 text-slate-300 border border-slate-800 flex items-center">
+          <span class="w-2 h-2 rounded-full bg-amber-400 inline-block mr-1.5"></span>DuckDB: Iniciando...
+        </div>
+
+        <button
+          id="status-pyodide"
+          onclick="window.DataDojoApp.ensurePyodideReady()"
+          title="Click para pre-cargar Pyodide (Python + sqlglot + pandas) en WebAssembly"
+          class="px-2.5 py-1 rounded-full text-xs font-mono bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 flex items-center transition"
+        >
+          <span class="w-2 h-2 rounded-full bg-slate-400 inline-block mr-1.5"></span>Pyodide/sqlglot: Lazy
+        </button>
+
+        <div class="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono bg-slate-900/90 border border-slate-800 text-emerald-400">
+          <span>🏆 <strong id="stat-completed">0/10 Retos</strong></span>
+          <span class="text-slate-600">|</span>
+          <span>🔥 <strong id="stat-streak">1d Racha</strong></span>
+        </div>
+
+        <button
+          onclick="document.getElementById('modal-schema').classList.remove('hidden')"
+          class="px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 transition"
+        >
+          🗄️ Esquemas Bancarios (5 Tablas)
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- MODE NAVIGATION BAR -->
+  <nav class="bg-slate-900/60 border-b border-slate-800/80 px-4 py-2.5">
+    <div class="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <button
+          data-mode-btn="mode1"
+          onclick="window.DataDojoApp.switchMode('mode1')"
+          class="px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold bg-emerald-600 text-white shadow-sm transition flex items-center gap-1.5"
+        >
+          🔧 Modo 1: Refactoriza el Cuello de Botella (Diagnóstico)
+        </button>
+        <button
+          data-mode-btn="mode2"
+          onclick="window.DataDojoApp.switchMode('mode2')"
+          class="px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium text-slate-300 hover:bg-slate-800/80 transition flex items-center gap-1.5"
+        >
+          🏗️ Modo 2: Casos de Negocio desde Cero (Guiado)
+        </button>
+        <button
+          data-mode-btn="mode3"
+          onclick="window.DataDojoApp.switchMode('mode3')"
+          class="px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium text-slate-300 hover:bg-slate-800/80 transition flex items-center gap-1.5"
+        >
+          📚 Modo 3: Codex de Teoría &amp; Patrones (Flashcards + Obsidian)
+        </button>
+      </div>
+
+      <div class="text-[11px] font-mono text-slate-400 hidden lg:block">
+        Offline-First PWA • Datos Bancarios Camuflados con Casos Borde Reales
+      </div>
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT AREA -->
+  <main class="flex-1 max-w-[1600px] w-full mx-auto p-4">
+
+    <!-- VIEW 1 & 2: INTERACTIVE DOJO WORKSPACE -->
+    <section id="view-workspace" class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+
+      <!-- LEFT COLUMN: CHALLENGE CATALOG & TECH FILTER (4 Cols on Desktop) -->
+      <aside class="lg:col-span-4 xl:col-span-3 space-y-3">
+        <div class="rounded-2xl bg-slate-900/70 border border-slate-800 p-3.5 space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xs font-mono uppercase tracking-wider text-slate-400 font-bold">
+              Catálogo de Retos (10)
+            </h2>
+            <span class="text-[11px] font-mono text-emerald-400">2 Decimales Exactos</span>
+          </div>
+
+          <!-- Tech Stack Filter Pills -->
+          <div class="flex flex-wrap gap-1 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+            <button data-tech-filter="all" onclick="window.DataDojoApp.setTechFilter('all')" class="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-emerald-600 text-white">
+              Todos
+            </button>
+            <button data-tech-filter="postgres" onclick="window.DataDojoApp.setTechFilter('postgres')" class="px-2.5 py-1 rounded-md text-xs font-mono text-slate-400 hover:text-slate-200">
+              PostgreSQL
+            </button>
+            <button data-tech-filter="oracle" onclick="window.DataDojoApp.setTechFilter('oracle')" class="px-2.5 py-1 rounded-md text-xs font-mono text-slate-400 hover:text-slate-200">
+              Oracle SQL
+            </button>
+            <button data-tech-filter="python" onclick="window.DataDojoApp.setTechFilter('python')" class="px-2.5 py-1 rounded-md text-xs font-mono text-slate-400 hover:text-slate-200">
+              Python ETL
+            </button>
+          </div>
+
+          <!-- Challenge List -->
+          <div id="challenge-list" class="space-y-2 max-h-[68vh] overflow-y-auto pr-1"></div>
+        </div>
+      </aside>
+
+      <!-- RIGHT COLUMN: ACTIVE CHALLENGE BRIEF, EDITOR & 3D EVALUATOR (8 Cols on Desktop) -->
+      <div class="lg:col-span-8 xl:col-span-9 space-y-4">
+
+        <!-- Challenge Problem Statement Card -->
+        <div class="rounded-2xl bg-slate-900/80 border border-slate-800 p-4 sm:p-5 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <span id="ch-badge-id" class="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60">
+                CH-01
+              </span>
+              <span id="ch-badge-tech" class="px-2.5 py-0.5 rounded-md text-xs font-mono bg-sky-950 text-sky-300 border border-sky-700/60">
+                PostgreSQL / DuckDB
+              </span>
+              <span id="ch-badge-diff" class="px-2.5 py-0.5 rounded-md text-xs font-mono bg-purple-950 text-purple-300 border border-purple-700/60">
+                Senior
+              </span>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <button
+                onclick="window.DataDojoApp.exportCurrentChallengeToObsidian(false)"
+                class="px-3 py-1 rounded-lg text-xs font-mono bg-purple-950/90 hover:bg-purple-900 text-purple-200 border border-purple-600/50 transition"
+                title="Descargar nota Markdown con YAML Frontmatter, Anti-Pattern vs Optimizado y WikiLinks para Obsidian"
+              >
+                📥 Nota Obsidian (.md)
+              </button>
+              <button
+                onclick="window.DataDojoApp.exportCurrentChallengeToObsidian(true)"
+                class="px-2.5 py-1 rounded-lg text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                title="Copiar nota en formato Markdown al portapapeles"
+              >
+                📋 Copiar .md
+              </button>
+            </div>
+          </div>
+
+          <h2 id="ch-title" class="text-lg sm:text-xl font-bold text-white"></h2>
+          <div id="ch-scenario" class="text-xs sm:text-sm text-slate-300 leading-relaxed space-y-2"></div>
+
+          <!-- 3-Level Progressive Hints Accordion -->
+          <details class="group pt-2 border-t border-slate-800/80">
+            <summary class="cursor-pointer list-none flex items-center justify-between text-xs font-mono font-semibold text-amber-300 hover:text-amber-200">
+              <span>🧭 Sistema de Pistas Progresivas (3 Niveles: Matemático → Capas/CTEs → Plantilla)</span>
+              <span class="text-slate-400 group-open:rotate-180 transition-transform">▼</span>
+            </summary>
+            <div id="ch-hints-container" class="mt-3 space-y-2"></div>
+          </details>
+        </div>
+
+        <!-- CODE EDITOR & ACTION TOOLBAR -->
+        <div class="rounded-2xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-mono font-bold text-slate-300 uppercase tracking-wider">
+                💻 Editor de Solución (Auto-guardado Local)
+              </span>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                onclick="window.DataDojoApp.resetStarterCode()"
+                class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+              >
+                ↺ Restaurar Inicio
+              </button>
+              <button
+                onclick="window.DataDojoApp.loadReferenceSolution()"
+                class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-700/40 transition"
+              >
+                ✨ Cargar Solución Óptima
+              </button>
+              <button
+                id="btn-run-audit"
+                onclick="window.DataDojoApp.evaluateCurrentSubmission()"
+                class="px-4 py-1.5 rounded-lg text-xs sm:text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/50 transition flex items-center gap-1.5"
+              >
+                ▶ Ejecutar &amp; Auditar <span class="hidden sm:inline text-[11px] opacity-80 font-mono">(Ctrl+Enter)</span>
+              </button>
+            </div>
+          </div>
+
+          <textarea id="code-editor-textarea" class="w-full h-80 bg-slate-950 text-slate-100 font-mono text-xs p-3 rounded-xl border border-slate-800"></textarea>
+        </div>
+
+        <!-- 3D EVALUATION TELEMETRY & AST OUTPUT -->
+        <div id="evaluation-results-container"></div>
+
+        <!-- GOLDEN DATASET EXPECTED TARGET -->
+        <details class="rounded-2xl bg-slate-900/70 border border-slate-800 p-4" open>
+          <summary class="cursor-pointer font-mono text-xs font-bold text-emerald-400 flex items-center justify-between">
+            <span>🎯 Golden Dataset Esperado (Referencia Auditable a 2 Decimales)</span>
+            <span class="text-slate-400 text-[11px]">Click para expandir/contraer</span>
+          </summary>
+          <div id="golden-dataset-preview" class="mt-3 overflow-x-auto"></div>
+        </details>
+
+      </div>
+    </section>
+
+    <!-- VIEW 3: CODEX DE TEORÍA Y PATRONES (FLASHCARDS INTERACTIVAS) -->
+    <section id="view-codex" class="hidden space-y-5">
+      <div class="rounded-2xl bg-slate-900/80 border border-slate-800 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-lg sm:text-xl font-bold text-white">
+            📚 Codex de Teoría y Patrones Algorítmicos (Second Brain Sync)
+          </h2>
+          <p class="text-xs sm:text-sm text-slate-300 mt-1">
+            Tarjetas interactivas de alta densidad técnica con comparativas Anti-Pattern vs. Optimizado y exportación directa a notas conectadas de <strong>Obsidian (`.md`)</strong>.
+          </p>
+        </div>
+        <div class="text-xs font-mono text-emerald-400 bg-emerald-950/60 px-3 py-2 rounded-xl border border-emerald-700/50">
+          8 Patrones Fundamentales de Banca &amp; ETL
+        </div>
+      </div>
+
+      <div id="codex-cards-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-5"></div>
+    </section>
+
+  </main>
+
+  <!-- MODAL: SYNTHETIC BANKING SCHEMA EXPLORER -->
+  <div id="modal-schema" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-[#0B0F17] border border-slate-700 rounded-2xl max-w-4xl w-full max-h-[88vh] flex flex-col shadow-2xl">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div>
+          <h3 class="text-base sm:text-lg font-bold text-white font-mono">
+            🗄️ Ecosistema Bancario Sintético (DuckDB-Wasm &amp; Pyodide)
+          </h3>
+          <p class="text-xs text-slate-400">
+            Esquemas camuflados 100% deterministas con casos trampa diseñados para entrenar pensamiento algorítmico.
+          </p>
+        </div>
+        <button
+          onclick="document.getElementById('modal-schema').classList.add('hidden')"
+          class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs"
+        >
+          ✕ Cerrar
+        </button>
+      </div>
+      <div id="schema-explorer-body" class="p-4 overflow-y-auto space-y-4"></div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="app-toast" class="hidden"></div>
+
+  <!-- SCRIPTS -->
+  <script src="./assets/js/seed_data.js"></script>
+  <script src="./assets/js/engine.js"></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      window.DataDojoApp.initApp();
+    });
+  </script>
+</body>
+</html>

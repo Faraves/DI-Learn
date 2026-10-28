@@ -1,0 +1,51 @@
+name: Deploy DataDojo PWA to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Verify Static Assets & Catalog Integrity
+        run: |
+          test -f index.html
+          test -f manifest.json
+          test -f sw.js
+          test -f assets/js/engine.js
+          test -f assets/js/seed_data.js
+          test -f assets/js/evaluator.py
+          test -f challenges/catalog.json
+          python3 -m json.tool challenges/catalog.json > /dev/null
+          python3 -m py_compile assets/js/evaluator.py
+          echo "All PWA assets and Python AST evaluator verified successfully."
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,26 @@
+{
+  "name": "DataDojo: Financial & ETL Optimizer",
+  "short_name": "DataDojo",
+  "description": "Entrenador algorítmico 100% Client-Side (DuckDB-Wasm + Pyodide + sqlglot) para Ingeniería de Datos Bancarios, SQL y Optimización ETL.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0B0F17",
+  "theme_color": "#10B981",
+  "categories": ["education", "developer tools", "finance", "productivity"],
+  "icons": [
+    {
+      "src": "./assets/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

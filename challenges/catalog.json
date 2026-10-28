@@ -1,0 +1,551 @@
+{
+  "version": "1.2.0",
+  "title": "DataDojo: Financial & ETL Optimizer Catalog",
+  "challenges": [
+    {
+      "id": "CH-01",
+      "number": 1,
+      "title": "Sargability & La Trampa del AVG() Bancario en Snapshots",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "postgres",
+      "techLabel": "PostgreSQL / DuckDB",
+      "difficulty": "Senior",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic", "sargability", "avg-trap"],
+      "scenario": "Un analista construyó el reporte de cierre de **Diciembre 2025** (`31 días calendario`) para las cuentas comerciales en `USD` (`CTA-2001`, `CTA-2002`, `CTA-2003`). Sin embargo, el query tarda demasiado en tablas grandes porque usa `TO_CHAR(fecha_foto, 'YYYY-MM')` en el `WHERE` (rompiendo el índice B-Tree) y calcula el saldo promedio mensual con `AVG(monto_original)`. La cuenta `CTA-2003` se abrió el 22 de diciembre (solo tiene 10 fotos diarias), por lo que `AVG()` infla su promedio 3.1 veces y además mezcla el saldo puntual al cierre con el acumulado.\n\n**Objetivo:** Refactoriza la consulta usando un rango Sargable (`BETWEEN`), calcula `saldo_puntual_cierre` (exclusivamente la foto del `2025-12-31`) y `saldo_promedio_mes` (`SUM / 31.0`) redondeados a 2 decimales, ordenado por `id_cuenta`.",
+      "starterCode": "-- MODO 1: Diagnóstico — Refactoriza este query con 2 errores críticos\nSELECT\n    id_cuenta,\n    id_cliente,\n    -- Error 1: MAX() no es el saldo puntual al cierre si el saldo bajó el día 31\n    ROUND(MAX(monto_original), 2) AS saldo_puntual_cierre,\n    -- Error 2: AVG() divide entre filas activas (10 en CTA-2003) en vez de 31 días calendario\n    ROUND(AVG(monto_original), 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE TO_CHAR(fecha_foto, 'YYYY-MM') = '2025-12' -- Error 3: Predicado Non-Sargable\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY id_cuenta;",
+      "antiPatternCode": "SELECT\n    id_cuenta,\n    id_cliente,\n    ROUND(MAX(monto_original), 2) AS saldo_puntual_cierre,\n    ROUND(AVG(monto_original), 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE TO_CHAR(fecha_foto, 'YYYY-MM') = '2025-12'\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente;",
+      "antiPatternExplanation": "1. **Non-Sargable (`TO_CHAR` en `WHERE`)**: Obliga al motor a transformar cada fila de la tabla histórica a texto antes de comparar, anulando el Partition Pruning y los índices B-Tree.\n2. **Trampa del `AVG()` Bancario**: `AVG(monto_original)` divide entre `COUNT(filas)`. Para `CTA-2003` (activa solo 10 días con $3,100), `AVG()` arroja `$3,100.00` cuando el verdadero promedio financiero mensual es `$31,000 / 31 = $1,000.00`.\n3. **`MAX()` como Cierre**: Si una cuenta tuvo un pico a mitad de mes y retiró fondos el día 31, `MAX()` falsea el balance de cierre.",
+      "solutionCode": "SELECT\n    id_cuenta,\n    id_cliente,\n    ROUND(SUM(monto_original) FILTER (WHERE fecha_foto = DATE '2025-12-31'), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(monto_original) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY id_cuenta;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Concepto Matemático y Financiero",
+          "content": "El **Saldo Puntual al Cierre** es exclusivamente la fotografía del último día calendario del mes (`fecha_foto = '2025-12-31'`). El **Saldo Promedio Mensual** bancario siempre divide la suma de saldos diarios entre los días calendario totales del mes ($31$ en diciembre), nunca entre el número de registros presentes."
+        },
+        {
+          "level": 2,
+          "title": "Diseño Sargable y Agregación Condicional",
+          "content": "Sustituye `TO_CHAR(fecha_foto, 'YYYY-MM') = '2025-12'` por `fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'`. Usa la cláusula estándar `SUM(monto_original) FILTER (WHERE fecha_foto = DATE '2025-12-31')` para capturar el cierre en una sola pasada de escaneo."
+        },
+        {
+          "level": 3,
+          "title": "Plantilla Estructural",
+          "content": "SELECT id_cuenta, id_cliente,\n  ROUND(SUM(monto_original) FILTER (WHERE fecha_foto = DATE '2025-12-31'), 2) AS saldo_puntual_cierre,\n  ROUND(SUM(monto_original) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY id_cuenta;"
+        }
+      ],
+      "goldenDataset": [
+        { "id_cuenta": "CTA-2001", "id_cliente": "CLI-1001", "saldo_puntual_cierre": 23100.00, "saldo_promedio_mes": 20100.00 },
+        { "id_cuenta": "CTA-2002", "id_cliente": "CLI-1002", "saldo_puntual_cierre": 10000.00, "saldo_promedio_mes": 10000.00 },
+        { "id_cuenta": "CTA-2003", "id_cliente": "CLI-1003", "saldo_puntual_cierre": 3100.00, "saldo_promedio_mes": 1000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "Para garantizar el uso de índices B-Tree y Zone Maps en motores analíticos y transaccionales, las columnas de fecha en el `WHERE` jamás deben envolverse en funciones (`TO_CHAR`, `EXTRACT`, `DATE_TRUNC`). Asimismo, el Saldo Promedio Mensual financiero exige dividir la suma acumulada del mes entre la constante de días calendario del periodo ($D \\in \\{28,29,30,31\\}$), evitando el sesgo de supervivencia de `AVG()`.",
+        "wikilinks": ["[[Predicados Sargables]]", "[[Trampa del AVG Bancario]]", "[[Pre-Agregación]]"]
+      }
+    },
+    {
+      "id": "CH-02",
+      "number": 2,
+      "title": "Explosión de RAM en Depósitos: generate_series vs. Álgebra de Intervalos",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "postgres",
+      "techLabel": "PostgreSQL / DuckDB",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic", "interval-algebra"],
+      "scenario": "La tabla `pasivos.depositos_vigencia_intervalo` almacena certificados a plazo bajo el modelo de **intervalos semiabiertos `[fecha_apertura, fecha_vencimiento)`**, donde `fecha_vencimiento` es el día en que el título vence y deja de devengar (último día activo real = `fecha_vencimiento - 1`).\n\nEl query actual explota la memoria RAM usando `CROSS JOIN LATERAL generate_series(fecha_apertura, fecha_vencimiento, INTERVAL '1 day')` y además comete un error de frontera: duplica el día 15 en certificados renovados (`DEP-501` y `DEP-502`) e incluye como activo al cierre del `2025-12-31` el certificado `DEP-503` que venció ese mismo día.\n\n**Objetivo:** Elimina `generate_series` y calcula en $O(1)$ con `GREATEST` y `LEAST` para **Diciembre 2025**: `id_operacion`, `id_cliente`, `dias_activos`, `saldo_puntual_cierre` y `saldo_promedio_mes`, ordenado por `id_operacion`.",
+      "starterCode": "-- MODO 1: Diagnóstico — Elimina la explosión de RAM (generate_series) y corrige el intervalo [ini, fin)\nWITH serie_diaria AS (\n    SELECT\n        d.id_operacion,\n        d.id_cliente,\n        d.monto_nominal,\n        gs.dia::DATE AS fecha_dia\n    FROM pasivos.depositos_vigencia_intervalo d\n    CROSS JOIN LATERAL generate_series(d.fecha_apertura, d.fecha_vencimiento, INTERVAL '1 day') AS gs(dia)\n    WHERE gs.dia BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n)\nSELECT\n    id_operacion,\n    id_cliente,\n    COUNT(*) AS dias_activos,\n    ROUND(COALESCE(SUM(monto_nominal) FILTER (WHERE fecha_dia = DATE '2025-12-31'), 0), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(monto_nominal) / 31.0, 2) AS saldo_promedio_mes\nFROM serie_diaria\nGROUP BY id_operacion, id_cliente\nORDER BY id_operacion;",
+      "antiPatternCode": "SELECT d.id_operacion, gs.dia\nFROM pasivos.depositos_vigencia_intervalo d\nCROSS JOIN LATERAL generate_series(d.fecha_apertura, d.fecha_vencimiento, INTERVAL '1 day') AS gs(dia)\nWHERE gs.dia BETWEEN DATE '2025-12-01' AND DATE '2025-12-31';",
+      "antiPatternExplanation": "1. **Explosión de Cardinalidad $O(N \\times D)$**: Si tienes 2 millones de certificados a plazo, `generate_series` materializa más de 60 millones de filas intermedias en RAM antes de agrupar.\n2. **Frontera Cerrada Incorrecta `[ini, fin]`**: Al generar hasta `fecha_vencimiento` inclusive, un depósito que vence el día 15 y se renueva el día 15 cotiza doble ese día (32 días en diciembre), y un depósito que vence el 31 de diciembre aparece erróneamente con saldo al cierre.",
+      "solutionCode": "WITH calculo_intervalos AS (\n    SELECT\n        id_operacion,\n        id_cliente,\n        monto_nominal,\n        fecha_apertura,\n        fecha_vencimiento,\n        GREATEST(\n            0,\n            (LEAST(fecha_vencimiento - INTERVAL '1 day', DATE '2025-12-31')::DATE\n             - GREATEST(fecha_apertura, DATE '2025-12-01')::DATE) + 1\n        ) AS dias_activos\n    FROM pasivos.depositos_vigencia_intervalo\n    WHERE fecha_apertura <= DATE '2025-12-31'\n      AND fecha_vencimiento > DATE '2025-12-01'\n)\nSELECT\n    id_operacion,\n    id_cliente,\n    dias_activos,\n    ROUND(\n        CASE\n            WHEN fecha_apertura <= DATE '2025-12-31' AND fecha_vencimiento > DATE '2025-12-31'\n            THEN monto_nominal\n            ELSE 0.00\n        END,\n        2\n    ) AS saldo_puntual_cierre,\n    ROUND((monto_nominal * dias_activos) / 31.0, 2) AS saldo_promedio_mes\nFROM calculo_intervalos\nORDER BY id_operacion;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Álgebra de Intervalos Semiabiertos [apertura, vencimiento)",
+          "content": "Como `fecha_vencimiento` es exclusiva, el último día activo real del contrato es `fecha_vencimiento - 1 día`. La intersección con el mes `[ini_mes, fin_mes]` tiene inicio efectivo `GREATEST(fecha_apertura, ini_mes)` y fin efectivo `LEAST(fecha_vencimiento - 1, fin_mes)`."
+        },
+        {
+          "level": 2,
+          "title": "Condición de Saldo Puntual al Cierre",
+          "content": "Un certificado está vigente al cierre del mes (`2025-12-31`) sí y solo sí `fecha_apertura <= '2025-12-31' AND fecha_vencimiento > '2025-12-31'`. Observa el operador estrictamente mayor (`>`): si `fecha_vencimiento = '2025-12-31'` (`DEP-503`), el día 31 ya venció y su saldo puntual al cierre es `0.00`."
+        },
+        {
+          "level": 3,
+          "title": "Plantilla Estructural O(1)",
+          "content": "SELECT\n    id_operacion,\n    id_cliente,\n    (LEAST(fecha_vencimiento - INTERVAL '1 day', DATE '2025-12-31')::DATE - GREATEST(fecha_apertura, DATE '2025-12-01')::DATE) + 1 AS dias_activos,\n    ROUND(CASE WHEN fecha_apertura <= DATE '2025-12-31' AND fecha_vencimiento > DATE '2025-12-31' THEN monto_nominal ELSE 0 END, 2) AS saldo_puntual_cierre,\n    ROUND(monto_nominal * ((LEAST(fecha_vencimiento - INTERVAL '1 day', DATE '2025-12-31')::DATE - GREATEST(fecha_apertura, DATE '2025-12-01')::DATE) + 1) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.depositos_vigencia_intervalo\nWHERE fecha_apertura <= DATE '2025-12-31' AND fecha_vencimiento > DATE '2025-12-01'\nORDER BY id_operacion;"
+        }
+      ],
+      "goldenDataset": [
+        { "id_operacion": "DEP-501", "id_cliente": "CLI-1001", "dias_activos": 14, "saldo_puntual_cierre": 0.00, "saldo_promedio_mes": 45161.29 },
+        { "id_operacion": "DEP-502", "id_cliente": "CLI-1001", "dias_activos": 17, "saldo_puntual_cierre": 100000.00, "saldo_promedio_mes": 54838.71 },
+        { "id_operacion": "DEP-503", "id_cliente": "CLI-1002", "dias_activos": 30, "saldo_puntual_cierre": 0.00, "saldo_promedio_mes": 60000.00 },
+        { "id_operacion": "DEP-504", "id_cliente": "CLI-1003", "dias_activos": 31, "saldo_puntual_cierre": 40000.00, "saldo_promedio_mes": 40000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "El Álgebra de Intervalos sustituye la expansión física de fechas (`generate_series`) por una resta aritmética de cotas `LEAST` y `GREATEST` en complejidad $O(1)$ de tiempo y memoria. En instrumentos financieros con convención `[fecha_apertura, fecha_vencimiento)`, el día de vencimiento el capital ya fue restituido, por lo que la cota superior activa es `fecha_vencimiento - 1`.",
+        "wikilinks": ["[[Álgebra de Intervalos]]", "[[Snapshots vs Intervalos Semiabiertos]]", "[[Pre-Agregación]]"]
+      }
+    },
+    {
+      "id": "CH-03",
+      "number": 3,
+      "title": "LOCF Resiliente en Tesorería: Fines de Semana, Feriados y Tasas 0.00",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "postgres",
+      "techLabel": "PostgreSQL / DuckDB",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic", "locf", "lateral-join"],
+      "scenario": "Necesitas reportar en `USD` los saldos de **Diciembre 2025** de las cuentas `CTA-2001` (`USD`), `CTA-2004` (`EUR`) y `CTA-2005` (`COP`). La tabla `tesoreria.tasas_cambio_oficial` presenta dos casos borde reales:\n1. **No tiene registros en fines de semana ni feriados bancarios** (`2025-12-08`, `2025-12-25`).\n2. **El día `2025-12-10` se cargó con tasa `0.000000`** por un fallo del feed externo.\n\nEl query actual hace un `INNER JOIN` directo por fecha, perdiendo 11 días del mes y valorando en `$0.00` el día 10 de diciembre.\n\n**Objetivo:** Refactoriza la consulta usando `LEFT JOIN LATERAL` (arrastre *LOCF - Last Observation Carried Forward*) ignorando tasas `0.00` (`NULLIF(tasa, 0) IS NOT NULL`), y devuelve `id_cuenta`, `moneda`, `saldo_puntual_usd` y `saldo_promedio_usd` ordenado por `id_cuenta`.",
+      "starterCode": "-- MODO 1: Diagnóstico — Corrige la pérdida de fines de semana (INNER JOIN) y la tasa trampa 0.00\nSELECT\n    s.id_cuenta,\n    s.moneda,\n    ROUND(SUM(CASE\n        WHEN s.moneda = 'USD' THEN s.monto_original\n        WHEN s.moneda = 'EUR' THEN s.monto_original * t.tasa_eur_usd\n        WHEN s.moneda = 'COP' THEN s.monto_original * t.tasa_cop_usd\n    END) FILTER (WHERE s.fecha_foto = DATE '2025-12-31'), 2) AS saldo_puntual_usd,\n    ROUND(SUM(CASE\n        WHEN s.moneda = 'USD' THEN s.monto_original\n        WHEN s.moneda = 'EUR' THEN s.monto_original * t.tasa_eur_usd\n        WHEN s.moneda = 'COP' THEN s.monto_original * t.tasa_cop_usd\n    END) / 31.0, 2) AS saldo_promedio_usd\nFROM pasivos.saldos_diarios_snapshot s\nINNER JOIN tesoreria.tasas_cambio_oficial t\n    ON t.fecha_tasa = s.fecha_foto\nWHERE s.fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n  AND s.id_cuenta IN ('CTA-2001', 'CTA-2004', 'CTA-2005')\nGROUP BY s.id_cuenta, s.moneda\nORDER BY s.id_cuenta;",
+      "antiPatternCode": "FROM pasivos.saldos_diarios_snapshot s\nINNER JOIN tesoreria.tasas_cambio_oficial t\n    ON t.fecha_tasa = s.fecha_foto",
+      "antiPatternExplanation": "1. **Pérdida de Datos por `INNER JOIN`**: Como `tasas_cambio_oficial` solo publica en días hábiles, un `INNER JOIN` descarta todos los sábados, domingos y feriados, subestimando el saldo promedio en más de un 30%.\n2. **Corrupción por Tasa `0.00`**: Sin `NULLIF(tasa, 0)`, el día trampa `2025-12-10` anula el balance en moneda extranjera en lugar de arrastrar la última tasa válida del `2025-12-09`.",
+      "solutionCode": "WITH saldos_mes AS (\n    SELECT\n        id_cuenta,\n        moneda,\n        fecha_foto,\n        monto_original\n    FROM pasivos.saldos_diarios_snapshot\n    WHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n      AND id_cuenta IN ('CTA-2001', 'CTA-2004', 'CTA-2005')\n)\nSELECT\n    s.id_cuenta,\n    s.moneda,\n    ROUND(SUM(\n        CASE\n            WHEN s.moneda = 'USD' THEN s.monto_original\n            WHEN s.moneda = 'EUR' THEN s.monto_original * locf.tasa_eur_usd\n            WHEN s.moneda = 'COP' THEN s.monto_original * locf.tasa_cop_usd\n        END\n    ) FILTER (WHERE s.fecha_foto = DATE '2025-12-31'), 2) AS saldo_puntual_usd,\n    ROUND(SUM(\n        CASE\n            WHEN s.moneda = 'USD' THEN s.monto_original\n            WHEN s.moneda = 'EUR' THEN s.monto_original * locf.tasa_eur_usd\n            WHEN s.moneda = 'COP' THEN s.monto_original * locf.tasa_cop_usd\n        END\n    ) / 31.0, 2) AS saldo_promedio_usd\nFROM saldos_mes s\nLEFT JOIN LATERAL (\n    SELECT\n        t.tasa_eur_usd,\n        t.tasa_cop_usd\n    FROM tesoreria.tasas_cambio_oficial t\n    WHERE t.fecha_tasa <= s.fecha_foto\n      AND NULLIF(t.tasa_eur_usd, 0) IS NOT NULL\n      AND NULLIF(t.tasa_cop_usd, 0) IS NOT NULL\n    ORDER BY t.fecha_tasa DESC\n    LIMIT 1\n) locf ON TRUE\nGROUP BY s.id_cuenta, s.moneda\nORDER BY s.id_cuenta;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Concepto Financiero: LOCF (Last Observation Carried Forward)",
+          "content": "En contabilidad bancaria, los sábados, domingos, feriados o días con caída del proveedor de precios se valúan con la última tasa oficial válida disponible en o antes de la fecha de foto (`t.fecha_tasa <= s.fecha_foto`)."
+        },
+        {
+          "level": 2,
+          "title": "Blindaje contra Tasas 0.00 con NULLIF",
+          "content": "Dentro del subselect de `LEFT JOIN LATERAL`, filtra `WHERE t.fecha_tasa <= s.fecha_foto AND NULLIF(t.tasa_eur_usd, 0) IS NOT NULL AND NULLIF(t.tasa_cop_usd, 0) IS NOT NULL ORDER BY t.fecha_tasa DESC LIMIT 1`."
+        },
+        {
+          "level": 3,
+          "title": "Estructura con LEFT JOIN LATERAL",
+          "content": "LEFT JOIN LATERAL (\n    SELECT t.tasa_eur_usd, t.tasa_cop_usd\n    FROM tesoreria.tasas_cambio_oficial t\n    WHERE t.fecha_tasa <= s.fecha_foto\n      AND NULLIF(t.tasa_eur_usd, 0) IS NOT NULL\n      AND NULLIF(t.tasa_cop_usd, 0) IS NOT NULL\n    ORDER BY t.fecha_tasa DESC\n    LIMIT 1\n) locf ON TRUE"
+        }
+      ],
+      "goldenDataset": [
+        { "id_cuenta": "CTA-2001", "moneda": "USD", "saldo_puntual_usd": 23100.00, "saldo_promedio_usd": 20100.00 },
+        { "id_cuenta": "CTA-2004", "moneda": "EUR", "saldo_puntual_usd": 11000.00, "saldo_promedio_usd": 11000.00 },
+        { "id_cuenta": "CTA-2005", "moneda": "COP", "saldo_puntual_usd": 10000.00, "saldo_promedio_usd": 10000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "El patrón **LOCF (Last Observation Carried Forward)** mediante `LEFT JOIN LATERAL (... ORDER BY fecha_tasa DESC LIMIT 1)` resuelve huecos de calendario en series temporales financieras sin necesidad de rellenar calendarios completos en disco. Combinado con `NULLIF(tasa, 0)`, protege el pipeline contra tasas corruptas en cero.",
+        "wikilinks": ["[[LOCF con LEFT JOIN LATERAL]]", "[[Pre-Agregación]]", "[[Predicados Sargables]]"]
+      }
+    },
+    {
+      "id": "CH-04",
+      "number": 4,
+      "title": "Deduplicación CRM (DISTINCT ON) & Lógica Booleana De Morgan",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "postgres",
+      "techLabel": "PostgreSQL / DuckDB",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic", "distinct-on", "de-morgan"],
+      "scenario": "El comité comercial solicita los saldos en `USD` (`moneda = 'USD'`) de **Diciembre 2025** agrupados por `segmento_comercial` vigente al cierre del mes (`2025-12-31`), excluyendo cuentas internas (`%TRANSITORIA%`) y garantías bloqueadas (`%GARANTIA%`).\n\nEl query actual tiene **3 errores graves**:\n1. Usa `desc_producto NOT ILIKE '%TRANSITORIA%' OR desc_producto NOT ILIKE '%GARANTIA%'` (violación de las Leyes de De Morgan que deja pasar todas las cuentas trampa).\n2. Hace `JOIN` directo con `crm.historico_segmento_cliente` sin deduplicar los clientes que cambiaron de segmento a mitad de diciembre (`CLI-1001`, `CLI-1002`), triplicando sus saldos.\n3.Hace el `JOIN` contra la tabla diaria antes de pre-agrupar por `id_cliente`.\n\n**Objetivo:** Corrige la lógica booleana (`AND`), pre-agrega los saldos por `id_cliente` y deduplica el segmento CRM con `DISTINCT ON (id_cliente)` ordenado por `fecha_corte DESC`. Ordena el resultado final por `segmento_comercial`.",
+      "starterCode": "-- MODO 1: Diagnóstico — Corrige la Ley de De Morgan (OR -> AND), pre-agrega y deduplica CRM con DISTINCT ON\nSELECT\n    c.segmento_comercial,\n    ROUND(SUM(s.monto_original) FILTER (WHERE s.fecha_foto = DATE '2025-12-31'), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(s.monto_original) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot s\nJOIN crm.historico_segmento_cliente c\n    ON c.id_cliente = s.id_cliente\nWHERE s.fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n  AND s.moneda = 'USD'\n  -- Error Booleano: NOT A OR NOT B siempre es TRUE\n  AND (s.desc_producto NOT ILIKE '%TRANSITORIA%' OR s.desc_producto NOT ILIKE '%GARANTIA%')\nGROUP BY c.segmento_comercial\nORDER BY c.segmento_comercial;",
+      "antiPatternCode": "FROM pasivos.saldos_diarios_snapshot s\nJOIN crm.historico_segmento_cliente c ON c.id_cliente = s.id_cliente\nWHERE (s.desc_producto NOT ILIKE '%TRANSITORIA%' OR s.desc_producto NOT ILIKE '%GARANTIA%')",
+      "antiPatternExplanation": "1. **Violación de De Morgan (`NOT A OR NOT B`)**: Como ninguna cuenta se llama al mismo tiempo `'TRANSITORIA'` y `'GARANTIA'`, al menos uno de los dos `NOT ILIKE` es verdadero en cada fila, por lo que el paréntesis evalúa a `TRUE` para el 100% de la tabla.\n2. **Explosión 1:N en `JOIN` con CRM**: `CLI-1001` tiene 3 filas históricas en `historico_segmento_cliente` hasta dic 2025. Hacer `JOIN` directo multiplica sus 31 fotos diarias por 3 (93 filas).",
+      "solutionCode": "WITH crm_dedup AS (\n    SELECT DISTINCT ON (id_cliente)\n        id_cliente,\n        segmento_comercial\n    FROM crm.historico_segmento_cliente\n    WHERE fecha_corte <= DATE '2025-12-31'\n    ORDER BY id_cliente, fecha_corte DESC\n),\nsaldos_preagregados AS (\n    SELECT\n        id_cliente,\n        SUM(monto_original) FILTER (WHERE fecha_foto = DATE '2025-12-31') AS puntual_cliente,\n        SUM(monto_original) / 31.0 AS promedio_cliente\n    FROM pasivos.saldos_diarios_snapshot\n    WHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n      AND moneda = 'USD'\n      AND desc_producto NOT ILIKE '%TRANSITORIA%'\n      AND desc_producto NOT ILIKE '%GARANTIA%'\n    GROUP BY id_cliente\n)\nSELECT\n    c.segmento_comercial,\n    ROUND(SUM(s.puntual_cliente), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(s.promedio_cliente), 2) AS saldo_promedio_mes\nFROM saldos_preagregados s\nJOIN crm_dedup c\n    ON c.id_cliente = s.id_cliente\nGROUP BY c.segmento_comercial\nORDER BY c.segmento_comercial;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Leyes de De Morgan en Filtros de Exclusión",
+          "content": "La negación de una disyunción $\\neg(A \\lor B)$ equivale a la conjunción de las negaciones $(\\neg A \\land \\neg B)$. En SQL, para excluir dos patrones debes escribir `desc_producto NOT ILIKE '%TRANSITORIA%' AND desc_producto NOT ILIKE '%GARANTIA%'`."
+        },
+        {
+          "level": 2,
+          "title": "Deduplicación Preventiva con DISTINCT ON",
+          "content": "En un CTE `crm_dedup`, obtén exactamente 1 fila por cliente al cierre del mes: `SELECT DISTINCT ON (id_cliente) id_cliente, segmento_comercial FROM crm.historico_segmento_cliente WHERE fecha_corte <= DATE '2025-12-31' ORDER BY id_cliente, fecha_corte DESC`."
+        },
+        {
+          "level": 3,
+          "title": "Pre-Agregación antes del JOIN",
+          "content": "Agrupa primero `saldos_diarios_snapshot` por `id_cliente` (reduciendo 100+ filas diarias a solo 3 filas de clientes) y luego haz el `JOIN` 1:1 contra `crm_dedup`."
+        }
+      ],
+      "goldenDataset": [
+        { "segmento_comercial": "BANCA_CORPORATIVA", "saldo_puntual_cierre": 23100.00, "saldo_promedio_mes": 20100.00 },
+        { "segmento_comercial": "BANCA_PRIVADA", "saldo_puntual_cierre": 10000.00, "saldo_promedio_mes": 10000.00 },
+        { "segmento_comercial": "BANCA_PYME", "saldo_puntual_cierre": 3100.00, "saldo_promedio_mes": 1000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "Cuando se cruzan tablas de hechos diarias (Snapshots) con dimensiones lentamente cambiantes (SCD Tipo 2 como `historico_segmento_cliente`), se debe aplicar **Pre-Agregación** en la tabla de hechos y **Deduplicación Determinista** (`DISTINCT ON (id_cliente) ... ORDER BY fecha_corte DESC`) en la dimensión antes del `JOIN` para garantizar cardinalidad 1:1.",
+        "wikilinks": ["[[Deduplicación con DISTINCT ON]]", "[[Leyes de De Morgan en SQL]]", "[[Pre-Agregación]]"]
+      }
+    },
+    {
+      "id": "CH-05",
+      "number": 5,
+      "title": "Optimización Oracle SQL: TRUNC Non-Sargable, NVL(0) y FETCH FIRST",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "oracle",
+      "techLabel": "Oracle SQL (via sqlglot)",
+      "difficulty": "Senior",
+      "tags": ["data-engineering", "sql-optimization", "oracle-sql", "sargability"],
+      "scenario": "En el core bancario **Oracle SQL**, un desarrollador escribió una consulta para obtener el ranking de cuentas comerciales `USD` (`CTA-2001`, `CTA-2002`, `CTA-2003`) en **Diciembre 2025** ordenadas de mayor a menor por `saldo_puntual_cierre`.\n\nEl código original usa `TRUNC(fecha_foto, 'MM') = TO_DATE('2025-12-01', 'YYYY-MM-DD')` en el `WHERE` (invalidando el índice particionado de Oracle) y usa `AVG(NVL(monto_original, 0))` creyendo que `NVL` rellena los 21 días faltantes de la cuenta `CTA-2003`.\n\n**Objetivo:** Escribe la consulta en dialecto **Oracle SQL** (`TO_DATE`, `NVL`, `DECODE` o `CASE`, `FETCH FIRST 3 ROWS ONLY`) eliminando el `TRUNC` del `WHERE` y calculando el promedio real sobre `31` días. `sqlglot` validará tu AST de Oracle y lo transpilará a DuckDB para verificar los saldos.",
+      "starterCode": "-- MODO 1 (Dialecto Oracle SQL): Elimina TRUNC() en WHERE y corrige la trampa AVG(NVL())\nSELECT\n    id_cuenta,\n    id_cliente,\n    ROUND(SUM(DECODE(fecha_foto, TO_DATE('2025-12-31', 'YYYY-MM-DD'), monto_original, 0)), 2) AS saldo_puntual_cierre,\n    ROUND(AVG(NVL(monto_original, 0)), 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE TRUNC(fecha_foto, 'MM') = TO_DATE('2025-12-01', 'YYYY-MM-DD')\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY saldo_puntual_cierre DESC\nFETCH FIRST 3 ROWS ONLY;",
+      "antiPatternCode": "WHERE TRUNC(fecha_foto, 'MM') = TO_DATE('2025-12-01', 'YYYY-MM-DD')\n-- Y en el SELECT:\nROUND(AVG(NVL(monto_original, 0)), 2) AS saldo_promedio_mes",
+      "antiPatternExplanation": "1. **`TRUNC(fecha_foto, 'MM')` en `WHERE`**: En Oracle, aplicar `TRUNC` sobre la columna de partición o índice impide el *Partition Pruning* a menos que exista un Function-Based Index específico.\n2. **Mito del `NVL(monto, 0)` dentro de `AVG()`**: `NVL` solo actúa sobre filas que existen con valor `NULL`; jamás inventa las 21 filas de fechas en las que la cuenta `CTA-2003` aún no existía.",
+      "solutionCode": "SELECT\n    id_cuenta,\n    id_cliente,\n    ROUND(SUM(DECODE(fecha_foto, TO_DATE('2025-12-31', 'YYYY-MM-DD'), NVL(monto_original, 0), 0)), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(NVL(monto_original, 0)) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE fecha_foto BETWEEN TO_DATE('2025-12-01', 'YYYY-MM-DD') AND TO_DATE('2025-12-31', 'YYYY-MM-DD')\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY saldo_puntual_cierre DESC\nFETCH FIRST 3 ROWS ONLY;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Por qué NVL(monto, 0) no arregla AVG()",
+          "content": "Si una cuenta tiene solo 10 registros físicos en diciembre, `AVG(NVL(monto_original, 0))` sigue dividiendo entre 10. En Oracle debes usar `SUM(NVL(monto_original, 0)) / 31.0`."
+        },
+        {
+          "level": 2,
+          "title": "Rango Sargable en Oracle con TO_DATE",
+          "content": "Reemplaza `TRUNC(fecha_foto, 'MM') = ...` por `fecha_foto BETWEEN TO_DATE('2025-12-01', 'YYYY-MM-DD') AND TO_DATE('2025-12-31', 'YYYY-MM-DD')`."
+        },
+        {
+          "level": 3,
+          "title": "Plantilla Oracle SQL",
+          "content": "SELECT\n    id_cuenta,\n    id_cliente,\n    ROUND(SUM(DECODE(fecha_foto, TO_DATE('2025-12-31', 'YYYY-MM-DD'), NVL(monto_original, 0), 0)), 2) AS saldo_puntual_cierre,\n    ROUND(SUM(NVL(monto_original, 0)) / 31.0, 2) AS saldo_promedio_mes\nFROM pasivos.saldos_diarios_snapshot\nWHERE fecha_foto BETWEEN TO_DATE('2025-12-01', 'YYYY-MM-DD') AND TO_DATE('2025-12-31', 'YYYY-MM-DD')\n  AND id_cuenta IN ('CTA-2001', 'CTA-2002', 'CTA-2003')\nGROUP BY id_cuenta, id_cliente\nORDER BY saldo_puntual_cierre DESC\nFETCH FIRST 3 ROWS ONLY;"
+        }
+      ],
+      "goldenDataset": [
+        { "id_cuenta": "CTA-2001", "id_cliente": "CLI-1001", "saldo_puntual_cierre": 23100.00, "saldo_promedio_mes": 20100.00 },
+        { "id_cuenta": "CTA-2002", "id_cliente": "CLI-1002", "saldo_puntual_cierre": 10000.00, "saldo_promedio_mes": 10000.00 },
+        { "id_cuenta": "CTA-2003", "id_cliente": "CLI-1003", "saldo_puntual_cierre": 3100.00, "saldo_promedio_mes": 1000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "En **Oracle SQL**, el uso de `DECODE(fecha_foto, TO_DATE(...), monto, 0)` dentro de `SUM()` permite pivotar el saldo puntual al cierre en una sola lectura de tabla. Para habilitar el *Partition Pruning* en tablas particionadas por rango de fecha, evita `TRUNC(fecha_foto, 'MM')` en el `WHERE` y emplea predicados `BETWEEN TO_DATE(...) AND TO_DATE(...)`.",
+        "wikilinks": ["[[Predicados Sargables]]", "[[Trampa del AVG Bancario]]", "[[Equivalencias Oracle vs PostgreSQL]]"]
+      }
+    },
+    {
+      "id": "CH-06",
+      "number": 6,
+      "title": "Consolidación Multianual de Pasivos (Cierres Dic 23, Dic 24, Dic 25 y Sep 26)",
+      "mode": "mode2",
+      "modeLabel": "Modo 2: Casos de Negocio desde Cero",
+      "tech": "postgres",
+      "techLabel": "PostgreSQL / DuckDB",
+      "difficulty": "Principal",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic", "interval-algebra", "union-all"],
+      "scenario": "**Requerimiento Financiero Real:**\nDirección Financiera necesita consolidar en un único reporte auditado los **Saldos Puntuales al Cierre** y **Saldos Promedios Mensuales** en `USD` (`moneda = 'USD'`) de dos mundos con arquitecturas distintas:\n1. `'CUENTAS_DIARIAS'` (`pasivos.saldos_diarios_snapshot`), excluyendo cuentas con `%TRANSITORIA%` y `%GARANTIA%`.\n2. `'DEPOSITOS_INTERVALO'` (`pasivos.depositos_vigencia_intervalo`), modelados como intervalos semiabiertos `[fecha_apertura, fecha_vencimiento)`.\n\nLos 4 cortes exigidos son: **Dic 2023 (`2023-12`, 31 días), Dic 2024 (`2024-12`, 31 días), Dic 2025 (`2025-12`, 31 días) y Sep 2026 (`2026-09`, 30 días)**.\n\n**Columnas esperadas:** `periodo`, `origen_pasivo`, `saldo_puntual_cierre`, `saldo_promedio_mes`, ordenado por `periodo, origen_pasivo`.",
+      "starterCode": "-- MODO 2: Construcción Guiada desde Cero\n-- Usa los 3 niveles de pistas si necesitas guía paso a paso.\n-- Columnas requeridas: periodo, origen_pasivo, saldo_puntual_cierre, saldo_promedio_mes\n\nWITH periodos_cierre AS (\n    -- Define aquí los 4 periodos (2023-12, 2024-12, 2025-12, 2026-09) con ini_mes, fin_mes y dias_mes\n    SELECT '2023-12' AS periodo, DATE '2023-12-01' AS ini_mes, DATE '2023-12-31' AS fin_mes, 31.0 AS dias_mes\n)\nSELECT * FROM periodos_cierre;",
+      "antiPatternCode": "-- Anti-Pattern: 8 queries separados con UNION y generate_series sobre toda la tabla de intervalos\nSELECT '2023-12', AVG(monto_original) FROM pasivos.saldos_diarios_snapshot WHERE TO_CHAR(fecha_foto,'YYYY-MM')='2023-12'\nUNION\nSELECT '2023-12', AVG(monto_nominal) FROM pasivos.depositos_vigencia_intervalo CROSS JOIN generate_series(...);",
+      "antiPatternExplanation": "1. Escanea repetidamente las tablas por cada año en lugar de parametrizar un CTE maestro `periodos_cierre`.\n2. Usa `UNION` (con Sort/Dedup costoso) en vez de `UNION ALL`.\n3. Desglosa intervalos con `generate_series` en lugar de usar álgebra de intervalos con `GREATEST` y `LEAST`.",
+      "solutionCode": "WITH periodos_cierre AS (\n    SELECT * FROM (\n        VALUES\n            ('2023-12', DATE '2023-12-01', DATE '2023-12-31', 31.0),\n            ('2024-12', DATE '2024-12-01', DATE '2024-12-31', 31.0),\n            ('2025-12', DATE '2025-12-01', DATE '2025-12-31', 31.0),\n            ('2026-09', DATE '2026-09-01', DATE '2026-09-30', 30.0)\n    ) AS t(periodo, ini_mes, fin_mes, dias_mes)\n),\ncuentas_consolidadas AS (\n    SELECT\n        p.periodo,\n        'CUENTAS_DIARIAS' AS origen_pasivo,\n        ROUND(SUM(s.monto_original) FILTER (WHERE s.fecha_foto = p.fin_mes), 2) AS saldo_puntual_cierre,\n        ROUND(SUM(s.monto_original) / p.dias_mes, 2) AS saldo_promedio_mes\n    FROM periodos_cierre p\n    JOIN pasivos.saldos_diarios_snapshot s\n        ON s.fecha_foto BETWEEN p.ini_mes AND p.fin_mes\n    WHERE s.moneda = 'USD'\n      AND s.desc_producto NOT ILIKE '%TRANSITORIA%'\n      AND s.desc_producto NOT ILIKE '%GARANTIA%'\n    GROUP BY p.periodo, p.dias_mes\n),\ndepositos_consolidados AS (\n    SELECT\n        p.periodo,\n        'DEPOSITOS_INTERVALO' AS origen_pasivo,\n        ROUND(SUM(\n            CASE\n                WHEN d.fecha_apertura <= p.fin_mes AND d.fecha_vencimiento > p.fin_mes\n                THEN d.monto_nominal\n                ELSE 0.00\n            END\n        ), 2) AS saldo_puntual_cierre,\n        ROUND(SUM(\n            d.monto_nominal * (\n                (LEAST(d.fecha_vencimiento - INTERVAL '1 day', p.fin_mes)::DATE\n                 - GREATEST(d.fecha_apertura, p.ini_mes)::DATE) + 1\n            )\n        ) / p.dias_mes, 2) AS saldo_promedio_mes\n    FROM periodos_cierre p\n    JOIN pasivos.depositos_vigencia_intervalo d\n        ON d.fecha_apertura <= p.fin_mes\n       AND d.fecha_vencimiento > p.ini_mes\n    WHERE d.moneda = 'USD'\n    GROUP BY p.periodo, p.dias_mes\n)\nSELECT periodo, origen_pasivo, saldo_puntual_cierre, saldo_promedio_mes\nFROM cuentas_consolidadas\nUNION ALL\nSELECT periodo, origen_pasivo, saldo_puntual_cierre, saldo_promedio_mes\nFROM depositos_consolidados\nORDER BY periodo, origen_pasivo;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Pista 1: Parametrización conducida por Tabla de Periodos",
+          "content": "En lugar de repetir código 4 veces para Dic 23, Dic 24, Dic 25 y Sep 26, define un CTE `periodos_cierre(periodo, ini_mes, fin_mes, dias_mes)` usando `VALUES`. Nota que Diciembre tiene `31.0` días y Septiembre tiene `30.0` días."
+        },
+        {
+          "level": 2,
+          "title": "Pista 2: Diseño de Capas Simétricas para UNION ALL",
+          "content": "Construye dos CTEs con las mismas 4 columnas (`periodo`, `origen_pasivo`, `saldo_puntual_cierre`, `saldo_promedio_mes`): `cuentas_consolidadas` (usando `s.fecha_foto BETWEEN p.ini_mes AND p.fin_mes`) y `depositos_consolidados` (usando intersección de intervalos `d.fecha_apertura <= p.fin_mes AND d.fecha_vencimiento > p.ini_mes`)."
+        },
+        {
+          "level": 3,
+          "title": "Pista 3: Plantilla Estructural Completa",
+          "content": "WITH periodos_cierre AS (\n  SELECT * FROM (VALUES\n    ('2023-12', DATE '2023-12-01', DATE '2023-12-31', 31.0),\n    ('2024-12', DATE '2024-12-01', DATE '2024-12-31', 31.0),\n    ('2025-12', DATE '2025-12-01', DATE '2025-12-31', 31.0),\n    ('2026-09', DATE '2026-09-01', DATE '2026-09-30', 30.0)\n  ) AS t(periodo, ini_mes, fin_mes, dias_mes)\n)\n-- Une con UNION ALL cuentas_consolidadas y depositos_consolidados y ordena por periodo, origen_pasivo."
+        }
+      ],
+      "goldenDataset": [
+        { "periodo": "2023-12", "origen_pasivo": "CUENTAS_DIARIAS", "saldo_puntual_cierre": 18100.00, "saldo_promedio_mes": 15100.00 },
+        { "periodo": "2023-12", "origen_pasivo": "DEPOSITOS_INTERVALO", "saldo_puntual_cierre": 50000.00, "saldo_promedio_mes": 80000.00 },
+        { "periodo": "2024-12", "origen_pasivo": "CUENTAS_DIARIAS", "saldo_puntual_cierre": 21100.00, "saldo_promedio_mes": 18100.00 },
+        { "periodo": "2024-12", "origen_pasivo": "DEPOSITOS_INTERVALO", "saldo_puntual_cierre": 80000.00, "saldo_promedio_mes": 80000.00 },
+        { "periodo": "2025-12", "origen_pasivo": "CUENTAS_DIARIAS", "saldo_puntual_cierre": 36200.00, "saldo_promedio_mes": 31100.00 },
+        { "periodo": "2025-12", "origen_pasivo": "DEPOSITOS_INTERVALO", "saldo_puntual_cierre": 140000.00, "saldo_promedio_mes": 200000.00 },
+        { "periodo": "2026-09", "origen_pasivo": "CUENTAS_DIARIAS", "saldo_puntual_cierre": 40000.00, "saldo_promedio_mes": 37100.00 },
+        { "periodo": "2026-09", "origen_pasivo": "DEPOSITOS_INTERVALO", "saldo_puntual_cierre": 90000.00, "saldo_promedio_mes": 119000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "La consolidación multianual de pasivos heterogéneos (Snapshots diarios + Contratos por intervalo) se diseña mediante un CTE conductor de calendario (`periodos_cierre`), pre-agregación independiente en cada fuente y ensamble simétrico con `UNION ALL`.",
+        "wikilinks": ["[[Álgebra de Intervalos]]", "[[Snapshots vs Intervalos Semiabiertos]]", "[[Pre-Agregación]]", "[[Predicados Sargables]]"]
+      }
+    },
+    {
+      "id": "CH-07",
+      "number": 7,
+      "title": "Valuación Multidivisa Auditada en Oracle SQL (Cierre Sep 2026)",
+      "mode": "mode2",
+      "modeLabel": "Modo 2: Casos de Negocio desde Cero",
+      "tech": "oracle",
+      "techLabel": "Oracle SQL (via sqlglot)",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "oracle-sql", "fin-logic", "locf"],
+      "scenario": "**Requerimiento Financiero en Oracle SQL:**\nConstruye desde cero la consulta en dialecto **Oracle SQL** para el cierre de **Septiembre 2026** (`2026-09-01` al `2026-09-30`, `30 días calendario`) que convierta a `USD` todas las cuentas activas de `pasivos.saldos_diarios_snapshot` (`CTA-2001`, `CTA-2002`, `CTA-2004`, `CTA-2005`).\n\nRecuerda que en Septiembre 2026:\n- Hay fines de semana y el feriado `2026-09-15` sin tasa en `tesoreria.tasas_cambio_oficial` (requiere LOCF).\n- El día `2026-09-10` tiene tasa `0.00` trampa (usa `NULLIF`).\n\n**Columnas esperadas:** `id_cuenta`, `moneda`, `saldo_puntual_usd`, `saldo_promedio_usd`, ordenado por `id_cuenta`.",
+      "starterCode": "-- MODO 2 (Dialecto Oracle SQL): Construcción desde Cero para Septiembre 2026 (30 días)\n-- Usa TO_DATE, DECODE/CASE, NVL y NULLIF.\n\nSELECT\n    s.id_cuenta,\n    s.moneda\nFROM pasivos.saldos_diarios_snapshot s\nWHERE s.fecha_foto BETWEEN TO_DATE('2026-09-01', 'YYYY-MM-DD') AND TO_DATE('2026-09-30', 'YYYY-MM-DD');",
+      "antiPatternCode": "SELECT s.id_cuenta, AVG(s.monto_original * t.tasa_eur_usd)\nFROM pasivos.saldos_diarios_snapshot s, tesoreria.tasas_cambio_oficial t\nWHERE TRUNC(s.fecha_foto, 'MM') = TO_DATE('2026-09-01', 'YYYY-MM-DD')\n  AND s.fecha_foto = t.fecha_tasa;",
+      "antiPatternExplanation": "El join implícito por igualdad de fecha (`s.fecha_foto = t.fecha_tasa`) pierde los fines de semana y el feriado del 15 de septiembre, además de multiplicar por `0.00` el día 10 de septiembre.",
+      "solutionCode": "WITH tasas_validas AS (\n    SELECT\n        fecha_tasa,\n        tasa_eur_usd,\n        tasa_cop_usd\n    FROM tesoreria.tasas_cambio_oficial\n    WHERE NULLIF(tasa_eur_usd, 0) IS NOT NULL\n      AND NULLIF(tasa_cop_usd, 0) IS NOT NULL\n),\nsaldos_valuados AS (\n    SELECT\n        s.id_cuenta,\n        s.moneda,\n        s.fecha_foto,\n        CASE\n            WHEN s.moneda = 'USD' THEN s.monto_original\n            WHEN s.moneda = 'EUR' THEN s.monto_original * (\n                SELECT tv.tasa_eur_usd\n                FROM tasas_validas tv\n                WHERE tv.fecha_tasa <= s.fecha_foto\n                ORDER BY tv.fecha_tasa DESC\n                FETCH FIRST 1 ROWS ONLY\n            )\n            WHEN s.moneda = 'COP' THEN s.monto_original * (\n                SELECT tv.tasa_cop_usd\n                FROM tasas_validas tv\n                WHERE tv.fecha_tasa <= s.fecha_foto\n                ORDER BY tv.fecha_tasa DESC\n                FETCH FIRST 1 ROWS ONLY\n            )\n        END AS monto_usd\n    FROM pasivos.saldos_diarios_snapshot s\n    WHERE s.fecha_foto BETWEEN TO_DATE('2026-09-01', 'YYYY-MM-DD') AND TO_DATE('2026-09-30', 'YYYY-MM-DD')\n)\nSELECT\n    id_cuenta,\n    moneda,\n    ROUND(SUM(DECODE(fecha_foto, TO_DATE('2026-09-30', 'YYYY-MM-DD'), monto_usd, 0)), 2) AS saldo_puntual_usd,\n    ROUND(SUM(NVL(monto_usd, 0)) / 30.0, 2) AS saldo_promedio_usd\nFROM saldos_valuados\nGROUP BY id_cuenta, moneda\nORDER BY id_cuenta;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Pista 1: Filtrado previo de Tasas Corruptas (0.00)",
+          "content": "Crea un CTE `tasas_validas` que filtre `WHERE NULLIF(tasa_eur_usd, 0) IS NOT NULL AND NULLIF(tasa_cop_usd, 0) IS NOT NULL`. Así cualquier búsqueda hacia atrás (`<= fecha_foto`) encontrará siempre la última tasa oficial mayor que cero."
+        },
+        {
+          "level": 2,
+          "title": "Pista 2: Subconsulta Correlacionada con FETCH FIRST 1 ROWS ONLY en Oracle",
+          "content": "En Oracle 12c+, puedes obtener la tasa LOCF con `(SELECT tv.tasa_eur_usd FROM tasas_validas tv WHERE tv.fecha_tasa <= s.fecha_foto ORDER BY tv.fecha_tasa DESC FETCH FIRST 1 ROWS ONLY)` o con `LEFT JOIN LATERAL`."
+        },
+        {
+          "level": 3,
+          "title": "Pista 3: Agregación de Cierre (30 de Septiembre) y Promedio (/ 30.0)",
+          "content": "Usa `ROUND(SUM(DECODE(fecha_foto, TO_DATE('2026-09-30', 'YYYY-MM-DD'), monto_usd, 0)), 2) AS saldo_puntual_usd` y `ROUND(SUM(NVL(monto_usd, 0)) / 30.0, 2) AS saldo_promedio_usd`."
+        }
+      ],
+      "goldenDataset": [
+        { "id_cuenta": "CTA-2001", "moneda": "USD", "saldo_puntual_usd": 28000.00, "saldo_promedio_usd": 25100.00 },
+        { "id_cuenta": "CTA-2002", "moneda": "USD", "saldo_puntual_usd": 12000.00, "saldo_promedio_usd": 12000.00 },
+        { "id_cuenta": "CTA-2004", "moneda": "EUR", "saldo_puntual_usd": 18000.00, "saldo_promedio_usd": 18000.00 },
+        { "id_cuenta": "CTA-2005", "moneda": "COP", "saldo_puntual_usd": 15000.00, "saldo_promedio_usd": 15000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "En **Oracle SQL (12c/19c/23ai)**, el patrón `FETCH FIRST 1 ROWS ONLY` dentro de una subconsulta correlacionada o un bloque `LEFT JOIN LATERAL` permite implementar *LOCF* con soporte nativo del optimizador de costos (CBO).",
+        "wikilinks": ["[[LOCF con LEFT JOIN LATERAL]]", "[[Equivalencias Oracle vs PostgreSQL]]", "[[Predicados Sargables]]"]
+      }
+    },
+    {
+      "id": "CH-08",
+      "number": 8,
+      "title": "Vectorización Pandas: Eliminando .iterrows() y .apply(axis=1) en Intervalos",
+      "mode": "mode1",
+      "modeLabel": "Modo 1: Refactoriza el Cuello de Botella",
+      "tech": "python",
+      "techLabel": "Python (Pandas + NumPy)",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "python-etl", "fin-logic", "vectorization"],
+      "scenario": "Un script ETL en Python (`pandas`) procesa `depositos_vigencia_intervalo` para **Diciembre 2025** iterando fila por fila con `.iterrows()` y `.apply(..., axis=1)`. Además, comete el error de frontera cerrada `[apertura, vencimiento]` duplicando el día 15 y activando al cierre el certificado `DEP-503` que vence el 31 de diciembre.\n\n**Objetivo:** Refactoriza la función `transform_pasivos(datasets)` eliminando por completo `.iterrows()` y `.apply(axis=1)`. Usa operaciones 100% vectorizadas de `pandas`/`numpy` (`np.maximum`, `np.minimum`, `np.where`) para retornar un DataFrame con `id_operacion`, `id_cliente`, `dias_activos`, `saldo_puntual_cierre` y `saldo_promedio_mes` ordenado por `id_operacion`.",
+      "starterCode": "# MODO 1 (Python ETL): Elimina .iterrows() y .apply(axis=1) y vectoriza el Álgebra de Intervalos\nimport pandas as pd\nimport numpy as np\n\ndef transform_pasivos(datasets):\n    df = datasets['depositos_vigencia_intervalo'].copy()\n    ini_mes = pd.Timestamp('2025-12-01')\n    fin_mes = pd.Timestamp('2025-12-31')\n\n    # Anti-Pattern 1: Bucle .iterrows() en Python\n    filtered_rows = []\n    for idx, row in df.iterrows():\n        if pd.Timestamp(row['fecha_apertura']) <= fin_mes and pd.Timestamp(row['fecha_vencimiento']) > ini_mes:\n            filtered_rows.append(row)\n    res = pd.DataFrame(filtered_rows)\n\n    # Anti-Pattern 2: .apply(axis=1) con error de frontera cerrada\n    def calc_dias(r):\n        ini = max(pd.Timestamp(r['fecha_apertura']), ini_mes)\n        fin = min(pd.Timestamp(r['fecha_vencimiento']), fin_mes)\n        return (fin - ini).days + 1\n\n    res['dias_activos'] = res.apply(calc_dias, axis=1)\n    res['saldo_puntual_cierre'] = res.apply(\n        lambda r: r['monto_nominal'] if pd.Timestamp(r['fecha_vencimiento']) >= fin_mes else 0.0,\n        axis=1\n    )\n    res['saldo_promedio_mes'] = (res['monto_nominal'] * res['dias_activos'] / 31.0).round(2)\n    return res[['id_operacion', 'id_cliente', 'dias_activos', 'saldo_puntual_cierre', 'saldo_promedio_mes']].sort_values('id_operacion')\n",
+      "antiPatternCode": "for idx, row in df.iterrows():\n    ...\nres['dias_activos'] = res.apply(calc_dias, axis=1)",
+      "antiPatternExplanation": "1. **Overhead del Intérprete (`.iterrows()` y `.apply(axis=1)`)**: Instanciar un objeto `pd.Series` por cada fila convierte un cálculo vectorial de microsegundos en un cuello de botella de CPU y memoria.\n2. **Frontera Cerrada**: No restar 1 día a `fecha_vencimiento` (`pd.Timedelta(days=1)`) ni usar `>` estricto en el cierre corrompe los saldos financieros.",
+      "solutionCode": "import pandas as pd\nimport numpy as np\n\ndef transform_pasivos(datasets):\n    df = datasets['depositos_vigencia_intervalo'].copy()\n    apertura = pd.to_datetime(df['fecha_apertura'])\n    vencimiento = pd.to_datetime(df['fecha_vencimiento'])\n\n    ini_mes = pd.Timestamp('2025-12-01')\n    fin_mes = pd.Timestamp('2025-12-31')\n\n    mask = (apertura <= fin_mes) & (vencimiento > ini_mes)\n    df = df.loc[mask].copy()\n    apertura = apertura.loc[mask]\n    vencimiento = vencimiento.loc[mask]\n\n    ini_efectivo = np.maximum(apertura, ini_mes)\n    fin_efectivo = np.minimum(vencimiento - pd.Timedelta(days=1), fin_mes)\n\n    df['dias_activos'] = np.maximum(0, (fin_efectivo - ini_efectivo).dt.days + 1).astype(int)\n    df['saldo_puntual_cierre'] = np.where(\n        (apertura <= fin_mes) & (vencimiento > fin_mes),\n        df['monto_nominal'],\n        0.0\n    ).round(2)\n    df['saldo_promedio_mes'] = ((df['monto_nominal'] * df['dias_activos']) / 31.0).round(2)\n\n    cols = ['id_operacion', 'id_cliente', 'dias_activos', 'saldo_puntual_cierre', 'saldo_promedio_mes']\n    return df[cols].sort_values('id_operacion').reset_index(drop=True)\n",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Vectorización de Fechas en Pandas / NumPy",
+          "content": "Convierte las columnas una sola vez con `pd.to_datetime()`. Puedes calcular el máximo y mínimo elemento a elemento entre una Serie de fechas y un `pd.Timestamp` usando `np.maximum(apertura, ini_mes)` y `np.minimum(vencimiento - pd.Timedelta(days=1), fin_mes)`."
+        },
+        {
+          "level": 2,
+          "title": "Vectorización Condicional con np.where",
+          "content": "Reemplaza `.apply(lambda r: ..., axis=1)` por `np.where((apertura <= fin_mes) & (vencimiento > fin_mes), df['monto_nominal'], 0.0)`."
+        },
+        {
+          "level": 3,
+          "title": "Plantilla Vectorizada",
+          "content": "ini_efectivo = np.maximum(apertura, ini_mes)\nfin_efectivo = np.minimum(vencimiento - pd.Timedelta(days=1), fin_mes)\ndf['dias_activos'] = ((fin_efectivo - ini_efectivo).dt.days + 1).astype(int)"
+        }
+      ],
+      "goldenDataset": [
+        { "id_operacion": "DEP-501", "id_cliente": "CLI-1001", "dias_activos": 14, "saldo_puntual_cierre": 0.00, "saldo_promedio_mes": 45161.29 },
+        { "id_operacion": "DEP-502", "id_cliente": "CLI-1001", "dias_activos": 17, "saldo_puntual_cierre": 100000.00, "saldo_promedio_mes": 54838.71 },
+        { "id_operacion": "DEP-503", "id_cliente": "CLI-1002", "dias_activos": 30, "saldo_puntual_cierre": 0.00, "saldo_promedio_mes": 60000.00 },
+        { "id_operacion": "DEP-504", "id_cliente": "CLI-1003", "dias_activos": 31, "saldo_puntual_cierre": 40000.00, "saldo_promedio_mes": 40000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "En pipelines ETL con `pandas`, sustituir `.iterrows()` y `.apply(axis=1)` por kernels vectorizados en C (`np.maximum`, `np.minimum`, `np.where`, `.dt.days`) reduce el consumo de memoria RAM (`tracemalloc`) y acelera el tiempo de cómputo en 2 órdenes de magnitud.",
+        "wikilinks": ["[[Vectorización ETL en Python]]", "[[Álgebra de Intervalos]]"]
+      }
+    },
+    {
+      "id": "CH-09",
+      "number": 9,
+      "title": "Pipeline ETL Zero-Copy: Conciliación CRM + FX con pd.merge_asof",
+      "mode": "mode2",
+      "modeLabel": "Modo 2: Casos de Negocio desde Cero",
+      "tech": "python",
+      "techLabel": "Python (Pandas + NumPy)",
+      "difficulty": "Principal",
+      "tags": ["data-engineering", "python-etl", "fin-logic", "locf", "merge-asof"],
+      "scenario": "**Construcción de Pipeline ETL en Python desde Cero:**\nDesarrolla la función `transform_pasivos(datasets)` en `pandas` y `numpy` (100% vectorizada, sin `.iterrows()` ni `.apply(axis=1)`) para calcular el cierre y promedio mensual en `USD` de **Diciembre 2025** (`31 días`) agrupado por `segmento_comercial`:\n\n1. Filtra `saldos_diarios_snapshot` en diciembre 2025 excluyendo productos que contengan `'TRANSITORIA'` y `'GARANTIA'`.\n2. Limpia `tasas_cambio_oficial` descartando tasas `<= 0` y aplica **LOCF** con `pd.merge_asof(..., direction='backward')` para convertir `EUR` y `COP` a `USD`.\n3. Deduplica `historico_segmento_cliente` (`fecha_corte <= '2025-12-31'`) conservando el último segmento de cada cliente (`keep='last'`).\n4. Retorna un DataFrame con `segmento_comercial`, `saldo_puntual_usd` y `saldo_promedio_usd` ordenado por `segmento_comercial`.",
+      "starterCode": "# MODO 2 (Python ETL): Construye el pipeline vectorizado con pd.merge_asof y deduplicación CRM\nimport pandas as pd\nimport numpy as np\n\ndef transform_pasivos(datasets):\n    saldos = datasets['saldos_diarios_snapshot'].copy()\n    tasas = datasets['tasas_cambio_oficial'].copy()\n    crm = datasets['historico_segmento_cliente'].copy()\n\n    # Escribe aquí tu pipeline vectorizado\n    return pd.DataFrame()\n",
+      "antiPatternCode": "# Anti-Pattern: Hacer merge normal con tasas (pierde fines de semana) y merge sin drop_duplicates con CRM\ndf = saldos.merge(tasas, left_on='fecha_foto', right_on='fecha_tasa').merge(crm, on='id_cliente')",
+      "antiPatternExplanation": "Un `.merge()` equijoin por fecha descarta sábados, domingos y feriados. Por otro lado, cruzar contra `crm` sin `.drop_duplicates('id_cliente', keep='last')` multiplica los saldos de los clientes que cambiaron de segmento.",
+      "solutionCode": "import pandas as pd\nimport numpy as np\n\ndef transform_pasivos(datasets):\n    saldos = datasets['saldos_diarios_snapshot'].copy()\n    tasas = datasets['tasas_cambio_oficial'].copy()\n    crm = datasets['historico_segmento_cliente'].copy()\n\n    saldos['fecha_dt'] = pd.to_datetime(saldos['fecha_foto'])\n    mask_mes = (saldos['fecha_dt'] >= '2025-12-01') & (saldos['fecha_dt'] <= '2025-12-31')\n    mask_prod = (~saldos['desc_producto'].str.contains('TRANSITORIA', case=False)) & (\n        ~saldos['desc_producto'].str.contains('GARANTIA', case=False)\n    )\n    saldos = saldos.loc[mask_mes & mask_prod].sort_values('fecha_dt')\n\n    tasas['fecha_dt'] = pd.to_datetime(tasas['fecha_tasa'])\n    tasas_validas = tasas.loc[(tasas['tasa_eur_usd'] > 0) & (tasas['tasa_cop_usd'] > 0)].sort_values('fecha_dt')\n\n    merged_fx = pd.merge_asof(\n        saldos,\n        tasas_validas[['fecha_dt', 'tasa_eur_usd', 'tasa_cop_usd']],\n        on='fecha_dt',\n        direction='backward'\n    )\n\n    condiciones = [\n        merged_fx['moneda'] == 'USD',\n        merged_fx['moneda'] == 'EUR',\n        merged_fx['moneda'] == 'COP'\n    ]\n    valores = [\n        merged_fx['monto_original'],\n        merged_fx['monto_original'] * merged_fx['tasa_eur_usd'],\n        merged_fx['monto_original'] * merged_fx['tasa_cop_usd']\n    ]\n    merged_fx['monto_usd'] = np.select(condiciones, valores, default=0.0)\n    merged_fx['puntual_usd'] = np.where(merged_fx['fecha_foto'] == '2025-12-31', merged_fx['monto_usd'], 0.0)\n\n    por_cliente = merged_fx.groupby('id_cliente', as_index=False).agg(\n        saldo_puntual_usd=('puntual_usd', 'sum'),\n        suma_mes_usd=('monto_usd', 'sum')\n    )\n    por_cliente['saldo_promedio_usd'] = por_cliente['suma_mes_usd'] / 31.0\n\n    crm['fecha_corte_dt'] = pd.to_datetime(crm['fecha_corte'])\n    crm_dedup = (\n        crm.loc[crm['fecha_corte_dt'] <= '2025-12-31']\n        .sort_values(['id_cliente', 'fecha_corte_dt'])\n        .drop_duplicates(subset=['id_cliente'], keep='last')[['id_cliente', 'segmento_comercial']]\n    )\n\n    final_df = por_cliente.merge(crm_dedup, on='id_cliente', how='inner')\n    out = final_df.groupby('segmento_comercial', as_index=False).agg(\n        saldo_puntual_usd=('saldo_puntual_usd', 'sum'),\n        saldo_promedio_usd=('saldo_promedio_usd', 'sum')\n    )\n    out['saldo_puntual_usd'] = out['saldo_puntual_usd'].round(2)\n    out['saldo_promedio_usd'] = out['saldo_promedio_usd'].round(2)\n    return out.sort_values('segmento_comercial').reset_index(drop=True)\n",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Pista 1: LOCF Vectorizado con pd.merge_asof",
+          "content": "`pd.merge_asof(saldos_sorted, tasas_validas_sorted, on='fecha_dt', direction='backward')` es el equivalente exacto en Pandas de `LEFT JOIN LATERAL` en SQL: asigna en $O(N)$ la última tasa válida anterior o igual a la fecha de la foto."
+        },
+        {
+          "level": 2,
+          "title": "Pista 2: Conversión Multidivisa con np.select y Deduplicación CRM",
+          "content": "Usa `np.select([df['moneda']=='USD', df['moneda']=='EUR', df['moneda']=='COP'], [df['monto_original'], df['monto_original']*df['tasa_eur_usd'], df['monto_original']*df['tasa_cop_usd']])`. Para CRM usa `.sort_values('fecha_corte_dt').drop_duplicates('id_cliente', keep='last')`."
+        },
+        {
+          "level": 3,
+          "title": "Pista 3: Pre-Agregación por id_cliente antes del merge con CRM",
+          "content": "Agrupa primero `merged_fx` por `id_cliente` calculando la suma del día 31 y la suma del mes dividida entre `31.0`, y luego haz `.merge(crm_dedup, on='id_cliente')`."
+        }
+      ],
+      "goldenDataset": [
+        { "segmento_comercial": "BANCA_CORPORATIVA", "saldo_puntual_usd": 33100.00, "saldo_promedio_usd": 30100.00 },
+        { "segmento_comercial": "BANCA_PREFERENTE", "saldo_puntual_usd": 11000.00, "saldo_promedio_usd": 11000.00 },
+        { "segmento_comercial": "BANCA_PRIVADA", "saldo_puntual_usd": 10000.00, "saldo_promedio_usd": 10000.00 },
+        { "segmento_comercial": "BANCA_PYME", "saldo_puntual_usd": 3100.00, "saldo_promedio_usd": 1000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "El método `pd.merge_asof(..., direction='backward')` de Pandas ejecuta un *rolling join* ordenado en memoria lineal $O(N + M)$, resolviendo el arrastre de tasas de cambio (LOCF) sin bucles. Combinado con `np.select` y `.drop_duplicates(keep='last')`, conforma el estándar de oro para ETL bancario en Python.",
+        "wikilinks": ["[[Vectorización ETL en Python]]", "[[LOCF con LEFT JOIN LATERAL]]", "[[Deduplicación con DISTINCT ON]]"]
+      }
+    },
+    {
+      "id": "CH-10",
+      "number": 10,
+      "title": "Arquitectura Cross-Stack (SQL / Power Query M / R): Posición Integral por Cliente",
+      "mode": "mode2",
+      "modeLabel": "Modo 2: Casos de Negocio desde Cero",
+      "tech": "postgres",
+      "techLabel": "SQL + Power Query (M) + R",
+      "difficulty": "Principal",
+      "tags": ["data-engineering", "sql-optimization", "power-query", "r-datatable", "fin-logic"],
+      "scenario": "**Reto Capstone de Arquitectura (Pre-Agregación Extrema & Query Folding):**\nConsolida para **Diciembre 2025 (`31 días`)** la posición pasiva total en `USD` de cada cliente (`id_cliente`, `segmento_comercial`, `saldo_puntual_total_usd`, `saldo_promedio_total_usd`), sumando:\n1. Sus cuentas diarias en `USD`, `EUR` y `COP` convertidas a `USD` con LOCF (excluyendo `%TRANSITORIA%` y `%GARANTIA%`).\n2. Sus depósitos por intervalo (`depositos_vigencia_intervalo`) calculados con Álgebra de Intervalos.\n3. Su segmento comercial único vigente al `2025-12-31`.\n\n*Nota Pedagógica Cross-Stack:* Este diseño de **Pre-Agregación por Entidad antes del Join** es exactamente el que preserva el **Query Folding** en Power Query (M) y optimiza los **Rolling Joins** en R (`data.table`). Ordena el reporte final por `id_cliente`.",
+      "starterCode": "-- MODO 2 (Capstone Cross-Stack): Posición Integral USD por Cliente (Cuentas Multidivisa + Depósitos Intervalo + CRM)\n-- Columnas esperadas: id_cliente, segmento_comercial, saldo_puntual_total_usd, saldo_promedio_total_usd\n\nWITH crm_unico AS (\n    SELECT DISTINCT ON (id_cliente)\n        id_cliente,\n        segmento_comercial\n    FROM crm.historico_segmento_cliente\n    WHERE fecha_corte <= DATE '2025-12-31'\n    ORDER BY id_cliente, fecha_corte DESC\n)\nSELECT * FROM crm_unico ORDER BY id_cliente;",
+      "antiPatternCode": "// Anti-Pattern en Power Query (M) que rompe el Query Folding:\n// Table.AddColumn(Saldos, \"Tasa\", each List.Max(Table.SelectRows(Tasas, (t) => t[fecha_tasa] <= [fecha_foto])[tasa]))\n-- Y en SQL: Unir cuentas diarias + depósitos + CRM todo a nivel detalle antes de agrupar.",
+      "antiPatternExplanation": "En Power Query (M), invocar `Table.SelectRows` dentro de `Table.AddColumn` fila por fila rompe el *Query Folding* y descarga millones de registros al motor mashup local. En SQL y R (`data.table`), unir dos tablas de hechos (Cuentas y Depósitos) sin pre-agregar por `id_cliente` genera un producto cartesiano $M \\times N$ por cliente.",
+      "solutionCode": "WITH crm_unico AS (\n    SELECT DISTINCT ON (id_cliente)\n        id_cliente,\n        segmento_comercial\n    FROM crm.historico_segmento_cliente\n    WHERE fecha_corte <= DATE '2025-12-31'\n    ORDER BY id_cliente, fecha_corte DESC\n),\ncuentas_cliente_usd AS (\n    SELECT\n        s.id_cliente,\n        SUM(\n            CASE\n                WHEN s.moneda = 'USD' THEN s.monto_original\n                WHEN s.moneda = 'EUR' THEN s.monto_original * locf.tasa_eur_usd\n                WHEN s.moneda = 'COP' THEN s.monto_original * locf.tasa_cop_usd\n            END\n        ) FILTER (WHERE s.fecha_foto = DATE '2025-12-31') AS puntual_usd,\n        SUM(\n            CASE\n                WHEN s.moneda = 'USD' THEN s.monto_original\n                WHEN s.moneda = 'EUR' THEN s.monto_original * locf.tasa_eur_usd\n                WHEN s.moneda = 'COP' THEN s.monto_original * locf.tasa_cop_usd\n            END\n        ) / 31.0 AS promedio_usd\n    FROM pasivos.saldos_diarios_snapshot s\n    LEFT JOIN LATERAL (\n        SELECT t.tasa_eur_usd, t.tasa_cop_usd\n        FROM tesoreria.tasas_cambio_oficial t\n        WHERE t.fecha_tasa <= s.fecha_foto\n          AND NULLIF(t.tasa_eur_usd, 0) IS NOT NULL\n          AND NULLIF(t.tasa_cop_usd, 0) IS NOT NULL\n        ORDER BY t.fecha_tasa DESC\n        LIMIT 1\n    ) locf ON TRUE\n    WHERE s.fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n      AND s.desc_producto NOT ILIKE '%TRANSITORIA%'\n      AND s.desc_producto NOT ILIKE '%GARANTIA%'\n    GROUP BY s.id_cliente\n),\ndepositos_cliente_usd AS (\n    SELECT\n        d.id_cliente,\n        SUM(\n            CASE\n                WHEN d.fecha_apertura <= DATE '2025-12-31' AND d.fecha_vencimiento > DATE '2025-12-31'\n                THEN d.monto_nominal\n                ELSE 0.00\n            END\n        ) AS puntual_usd,\n        SUM(\n            d.monto_nominal * (\n                (LEAST(d.fecha_vencimiento - INTERVAL '1 day', DATE '2025-12-31')::DATE\n                 - GREATEST(d.fecha_apertura, DATE '2025-12-01')::DATE) + 1\n            )\n        ) / 31.0 AS promedio_usd\n    FROM pasivos.depositos_vigencia_intervalo d\n    WHERE d.fecha_apertura <= DATE '2025-12-31'\n      AND d.fecha_vencimiento > DATE '2025-12-01'\n    GROUP BY d.id_cliente\n),\nunificado AS (\n    SELECT id_cliente, puntual_usd, promedio_usd FROM cuentas_cliente_usd\n    UNION ALL\n    SELECT id_cliente, puntual_usd, promedio_usd FROM depositos_cliente_usd\n)\nSELECT\n    u.id_cliente,\n    c.segmento_comercial,\n    ROUND(SUM(u.puntual_usd), 2) AS saldo_puntual_total_usd,\n    ROUND(SUM(u.promedio_usd), 2) AS saldo_promedio_total_usd\nFROM unificado u\nJOIN crm_unico c ON c.id_cliente = u.id_cliente\nGROUP BY u.id_cliente, c.segmento_comercial\nORDER BY u.id_cliente;",
+      "hints": [
+        {
+          "level": 1,
+          "title": "Pista 1: Evita el Producto Cartesiano entre dos Tablas de Hechos (Chasm Trap)",
+          "content": "Jamás hagas `JOIN` directo entre `saldos_diarios_snapshot` y `depositos_vigencia_intervalo` por `id_cliente`. Pre-agrega cada tabla por `id_cliente` en su propio CTE y apílalas con `UNION ALL` antes de sumar y cruzar con `crm_unico`."
+        },
+        {
+          "level": 2,
+          "title": "Pista 2: Equivalencia en Power Query (M) y R (data.table)",
+          "content": "En **R (`data.table`)**, el LOCF se escribe `tasas[tasa_eur_usd > 0][saldos, on = .(fecha_tasa = fecha_foto), roll = Inf]`. En **Power Query (M)**, mantén el *Query Folding* haciendo `Table.SelectRows` con cotas `Date` antes de `Table.Group`, o delegando la vista pre-agregada al motor SQL."
+        },
+        {
+          "level": 3,
+          "title": "Pista 3: Estructura de 4 CTEs (crm_unico, cuentas_cliente_usd, depositos_cliente_usd, unificado)",
+          "content": "Apila `cuentas_cliente_usd` y `depositos_cliente_usd` con `UNION ALL`, agrupa por `id_cliente` sumando `puntual_usd` y `promedio_usd`, y une 1:1 con `crm_unico`."
+        }
+      ],
+      "goldenDataset": [
+        { "id_cliente": "CLI-1001", "segmento_comercial": "BANCA_CORPORATIVA", "saldo_puntual_total_usd": 123100.00, "saldo_promedio_total_usd": 120100.00 },
+        { "id_cliente": "CLI-1002", "segmento_comercial": "BANCA_PRIVADA", "saldo_puntual_total_usd": 10000.00, "saldo_promedio_total_usd": 70000.00 },
+        { "id_cliente": "CLI-1003", "segmento_comercial": "BANCA_PYME", "saldo_puntual_total_usd": 43100.00, "saldo_promedio_total_usd": 41000.00 },
+        { "id_cliente": "CLI-1004", "segmento_comercial": "BANCA_PREFERENTE", "saldo_puntual_total_usd": 11000.00, "saldo_promedio_total_usd": 11000.00 },
+        { "id_cliente": "CLI-1005", "segmento_comercial": "BANCA_CORPORATIVA", "saldo_puntual_total_usd": 10000.00, "saldo_promedio_total_usd": 10000.00 }
+      ],
+      "obsidianMeta": {
+        "conceptSummary": "Para consolidar múltiples tablas de hechos (Cuentas Diarias + Depósitos a Plazo) sin incurrir en un *Chasm Trap* (explosión cartesiana $M \\times N$), cada hecho debe reducirse a la granularidad de `id_cliente` antes de combinarse mediante `UNION ALL`. En **Power Query (M)** esto preserva el *Query Folding*, y en **R (`data.table`)** se combina con `roll = Inf` para LOCF instantáneo.",
+        "wikilinks": ["[[Pre-Agregación]]", "[[Álgebra de Intervalos]]", "[[LOCF con LEFT JOIN LATERAL]]", "[[Deduplicación con DISTINCT ON]]"]
+      }
+    }
+  ],
+  "codex": [
+    {
+      "id": "CODEX-01",
+      "title": "Snapshots Diarios vs. Intervalos Semiabiertos [ini, fin)",
+      "category": "Modelado Financiero",
+      "tech": "SQL / ETL / Finanzas",
+      "difficulty": "Fundamento",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic"],
+      "wikilinks": ["[[Snapshots vs Intervalos Semiabiertos]]", "[[Álgebra de Intervalos]]", "[[Trampa del AVG Bancario]]"],
+      "summary": "En banca coexisten dos modelos físicos para representar pasivos: **Tablas de Fotografías Diarias (Snapshots)** donde existe 1 fila por cuenta y día (`fecha_foto`), y **Tablas de Vigencia por Intervalos `[fecha_apertura, fecha_vencimiento)`** donde 1 sola fila representa todo el ciclo de vida de un certificado a plazo.",
+      "visualDiagram": "MODELO SNAPSHOT (Cuentas Corrientes / Ahorro):\n[Día 01: $10k] -> [Día 02: $10k] -> ... -> [Día 31: $13.1k] (31 filas por mes)\n\nMODELO INTERVALO SEMIABIERTO [apertura, vencimiento) (CDTs / Bonos):\nDEP-501: [2025-12-01 ================= 2025-12-15)  -> Activo del 1 al 14 (14 días)\nDEP-502:                              [2025-12-15 ================= 2026-01-15) -> Activo del 15 al 31 (17 días)\n                                       ^ El día 15 NO se duplica gracias al límite abierto ')'",
+      "antiPatternCode": "-- ERROR: Tratar fecha_vencimiento como inclusiva (<=) duplica el día de renovación\nSELECT SUM(monto_nominal)\nFROM pasivos.depositos_vigencia_intervalo\nWHERE '2025-12-15' BETWEEN fecha_apertura AND fecha_vencimiento;",
+      "optimizedCode": "-- CORRECTO: Convención semiabierta [fecha_apertura, fecha_vencimiento)\n-- El día de vencimiento el dinero ya salió del certificado\nSELECT SUM(monto_nominal)\nFROM pasivos.depositos_vigencia_intervalo\nWHERE fecha_apertura <= DATE '2025-12-15'\n  AND fecha_vencimiento > DATE '2025-12-15';",
+      "resourceImpact": "Evita la duplicación contable en renovaciones automáticas del día 15 y evita inflar el saldo puntual al cierre cuando un instrumento vence el día 30 o 31 del mes."
+    },
+    {
+      "id": "CODEX-02",
+      "title": "Álgebra de Intervalos con GREATEST() y LEAST()",
+      "category": "Optimización de RAM y CPU",
+      "tech": "PostgreSQL / Oracle / DuckDB",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic"],
+      "wikilinks": ["[[Álgebra de Intervalos]]", "[[Snapshots vs Intervalos Semiabiertos]]", "[[Pre-Agregación]]"],
+      "summary": "Para calcular cuántos días estuvo activo un contrato dentro de un mes `[ini_mes, fin_mes]`, **jamás desgloses las fechas fila por fila con `generate_series`**. La intersección de dos intervalos $[A, B]$ y $[C, D]$ es simplemente $[\\max(A, C), \\min(B, D)]$, cuya longitud es $\\max(0, \\min(B, D) - \\max(A, C) + 1)$.",
+      "visualDiagram": "Mes Analizado:          [2025-12-01 ----------------------- 2025-12-31]\nContrato DEP-503:       [2025-12-01 ------------------- 2025-12-30] (vencimiento 2025-12-31 - 1 día)\nIntersección Efectiva:  GREATEST(apertura, ini_mes) = 2025-12-01\n                        LEAST(vencimiento - 1, fin_mes) = 2025-12-30\nDías Activos O(1):      (2025-12-30 - 2025-12-01) + 1 = 30 días (Cero filas extra en RAM)",
+      "antiPatternCode": "-- ANTI-PATTERN: Explosión O(N * 365) en memoria con generate_series\nSELECT d.id_operacion, COUNT(*) AS dias_activos\nFROM pasivos.depositos_vigencia_intervalo d\nCROSS JOIN LATERAL generate_series(d.fecha_apertura, d.fecha_vencimiento - 1, '1 day') g(dia)\nWHERE g.dia BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\nGROUP BY d.id_operacion;",
+      "optimizedCode": "-- OPTIMIZADO: Complejidad O(1) por fila con Álgebra de Intervalos\nSELECT\n    id_operacion,\n    GREATEST(\n        0,\n        (LEAST(fecha_vencimiento - INTERVAL '1 day', DATE '2025-12-31')::DATE\n         - GREATEST(fecha_apertura, DATE '2025-12-01')::DATE) + 1\n    ) AS dias_activos\nFROM pasivos.depositos_vigencia_intervalo\nWHERE fecha_apertura <= DATE '2025-12-31'\n  AND fecha_vencimiento > DATE '2025-12-01';",
+      "resourceImpact": "Reduce el uso de memoria RAM de $O(N \\times D)$ a $O(1)$ (hasta 99.7% menos memoria y 50x menos tiempo de CPU en carteras de millones de certificados)."
+    },
+    {
+      "id": "CODEX-03",
+      "title": "LOCF (Last Observation Carried Forward) con LEFT JOIN LATERAL",
+      "category": "Series Temporales y Tesorería",
+      "tech": "PostgreSQL / Oracle / DuckDB",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic"],
+      "wikilinks": ["[[LOCF con LEFT JOIN LATERAL]]", "[[Pre-Agregación]]", "[[Predicados Sargables]]"],
+      "summary": "Las tablas oficiales de tasas de cambio no publican registros en sábados, domingos ni feriados, y ocasionalmente contienen registros corruptos con valor `0.00`. El patrón **LOCF** busca para cada fecha la última cotización válida (`> 0`) cuya fecha sea menor o igual a la fecha evaluada.",
+      "visualDiagram": "Viernes 05 Dic: Tasa = 1.10  ---> Se usa el Viernes (1.10)\nSábado  06 Dic: (Sin fila)   ---> LOCF arrastra Viernes 05 (1.10)\nDomingo 07 Dic: (Sin fila)   ---> LOCF arrastra Viernes 05 (1.10)\nLunes   08 Dic: (Feriado)    ---> LOCF arrastra Viernes 05 (1.10)\nMiérc.  10 Dic: Tasa = 0.00  ---> NULLIF(0,0) lo ignora y LOCF arrastra Martes 09 (1.10)",
+      "antiPatternCode": "-- ANTI-PATTERN: INNER JOIN pierde el 30% de los días del mes; dividir sin NULLIF revienta el query\nSELECT s.fecha_foto, s.monto_original / t.tasa_eur_usd\nFROM pasivos.saldos_diarios_snapshot s\nINNER JOIN tesoreria.tasas_cambio_oficial t ON t.fecha_tasa = s.fecha_foto;",
+      "optimizedCode": "-- OPTIMIZADO: LEFT JOIN LATERAL con índice B-Tree en fecha_tasa DESC y blindaje NULLIF\nSELECT\n    s.fecha_foto,\n    s.monto_original * locf.tasa_eur_usd AS monto_usd\nFROM pasivos.saldos_diarios_snapshot s\nLEFT JOIN LATERAL (\n    SELECT t.tasa_eur_usd\n    FROM tesoreria.tasas_cambio_oficial t\n    WHERE t.fecha_tasa <= s.fecha_foto\n      AND NULLIF(t.tasa_eur_usd, 0) IS NOT NULL\n    ORDER BY t.fecha_tasa DESC\n    LIMIT 1\n) locf ON TRUE;",
+      "resourceImpact": "Ejecuta un *Index Seek* inverso de 1 sola fila en el índice de tasas, garantizando 0% de pérdida de saldos en fines de semana y 100% de resiliencia ante tasas `0.00`."
+    },
+    {
+      "id": "CODEX-04",
+      "title": "Sargability e Índices B-Tree / Zone Maps",
+      "category": "Motores de Base de Datos",
+      "tech": "PostgreSQL / Oracle / DuckDB",
+      "difficulty": "Senior",
+      "tags": ["data-engineering", "sql-optimization", "sargability"],
+      "wikilinks": ["[[Predicados Sargables]]", "[[Pre-Agregación]]"],
+      "summary": "Un predicado es **SARGable (*Search Argument Able*)** cuando el motor puede usar directamente la estructura ordenada de un índice B-Tree o los metadatos min/max de bloques columnares (Zone Maps / Parquet Row Groups) sin tener que evaluar una función sobre cada fila.",
+      "visualDiagram": "NON-SARGABLE: WHERE EXTRACT(YEAR FROM fecha_foto) = 2025 AND EXTRACT(MONTH FROM fecha_foto) = 12\n[Motor lee 100,000,000 de filas -> calcula EXTRACT() 200M de veces -> descarta 99%]\n\nSARGABLE:     WHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n[Motor salta en O(log N) directo al bloque 2025-12-01 -> lee solo el 1% necesario]",
+      "antiPatternCode": "-- ANTI-PATTERN: Funciones envolviendo la columna indexada en el WHERE\nSELECT SUM(monto_original)\nFROM pasivos.saldos_diarios_snapshot\nWHERE DATE_TRUNC('month', fecha_foto) = DATE '2025-12-01'\n   OR TO_CHAR(fecha_foto, 'YYYY-MM') = '2025-12';",
+      "optimizedCode": "-- OPTIMIZADO: La columna queda despejada a la izquierda del operador de rango\nSELECT SUM(monto_original)\nFROM pasivos.saldos_diarios_snapshot\nWHERE fecha_foto >= DATE '2025-12-01'\n  AND fecha_foto <= DATE '2025-12-31';",
+      "resourceImpact": "Habilita *Index Range Scan* en PostgreSQL/Oracle y *Zone Map Pruning* en DuckDB, reduciendo el I/O de disco de gigabytes a kilobytes."
+    },
+    {
+      "id": "CODEX-05",
+      "title": "Deduplicación Determinista con DISTINCT ON vs. ROW_NUMBER()",
+      "category": "Dimensiones Cambiantes (SCD2)",
+      "tech": "PostgreSQL / Oracle / DuckDB",
+      "difficulty": "Senior",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic"],
+      "wikilinks": ["[[Deduplicación con DISTINCT ON]]", "[[Pre-Agregación]]"],
+      "summary": "Cuando una tabla dimensional como `crm.historico_segmento_cliente` registra cambios intra-mes, hacer un `JOIN` directo duplica los saldos del cliente tantas veces como cambios haya tenido. Debes reducir la dimensión a cardinalidad `1:1` por `id_cliente` antes del `JOIN`.",
+      "visualDiagram": "crm.historico_segmento_cliente para CLI-1001:\n  - 2023-12-01: BANCA_EMPRESAS\n  - 2025-12-03: BANCA_PYME\n  - 2025-12-18: BANCA_CORPORATIVA  <-- Único registro vigente al cierre de Dic 2025\n\nDISTINCT ON (id_cliente) ... ORDER BY id_cliente, fecha_corte DESC retiene solo la fila del 18 de dic.",
+      "antiPatternCode": "-- ANTI-PATTERN: JOIN 1:N directo contra tabla histórica (triplica el saldo de CLI-1001)\nSELECT c.segmento_comercial, SUM(s.monto_original)\nFROM pasivos.saldos_diarios_snapshot s\nJOIN crm.historico_segmento_cliente c ON c.id_cliente = s.id_cliente\nGROUP BY c.segmento_comercial;",
+      "optimizedCode": "-- OPTIMIZADO (PostgreSQL / DuckDB): Deduplicación O(N log N) con DISTINCT ON\nWITH crm_unico AS (\n    SELECT DISTINCT ON (id_cliente)\n        id_cliente,\n        segmento_comercial\n    FROM crm.historico_segmento_cliente\n    WHERE fecha_corte <= DATE '2025-12-31'\n    ORDER BY id_cliente, fecha_corte DESC\n)\nSELECT c.segmento_comercial, SUM(s.monto_original)\nFROM pasivos.saldos_diarios_snapshot s\nJOIN crm_unico c ON c.id_cliente = s.id_cliente\nGROUP BY c.segmento_comercial;",
+      "resourceImpact": "Garantiza integridad contable (0% duplicación por fan-out) y ejecuta más rápido que `ROW_NUMBER() OVER (PARTITION BY ...)` al detenerse en la primera tupla de cada grupo."
+    },
+    {
+      "id": "CODEX-06",
+      "title": "Pre-Agregación Temprana y Leyes de De Morgan en SQL",
+      "category": "Álgebra Relacional y Booleana",
+      "tech": "SQL / Power Query / R",
+      "difficulty": "Senior",
+      "tags": ["data-engineering", "sql-optimization", "fin-logic"],
+      "wikilinks": ["[[Pre-Agregación]]", "[[Leyes de De Morgan en SQL]]", "[[Deduplicación con DISTINCT ON]]"],
+      "summary": "Dos reglas de oro antes de cruzar tablas masivas: (1) **Filtra y pre-agrega la tabla de hechos diaria** para reducir millones de filas a unos pocos miles de clientes antes de hacer `JOIN` o multiplicar tasas; (2) Al excluir múltiples textos con `NOT ILIKE`, usa siempre `AND` (Ley de De Morgan: $\\neg(A \\lor B) \\iff \\neg A \\land \\neg B$).",
+      "visualDiagram": "TABLA DE VERDAD DE MORGAN:\nProducto = 'CUENTA TRANSITORIA INTERNA'\n- ¿NOT ILIKE '%TRANSITORIA%'? -> FALSE\n- ¿NOT ILIKE '%GARANTIA%'?    -> TRUE\nSi usas OR:  FALSE OR TRUE  = TRUE (¡La cuenta trampa se cuela al reporte!)\nSi usas AND: FALSE AND TRUE = FALSE (Excluida correctamente)",
+      "antiPatternCode": "-- ANTI-PATTERN: OR en exclusiones + Multiplicación y JOIN fila a fila antes de agrupar\nSELECT c.segmento_comercial, SUM(s.monto_original * t.tasa_eur_usd)\nFROM pasivos.saldos_diarios_snapshot s\nJOIN crm_unico c ON c.id_cliente = s.id_cliente\nJOIN tasas t ON t.fecha_tasa = s.fecha_foto\nWHERE s.desc_producto NOT ILIKE '%TRANSITORIA%' OR s.desc_producto NOT ILIKE '%GARANTIA%'\nGROUP BY c.segmento_comercial;",
+      "optimizedCode": "-- OPTIMIZADO: Exclusión con AND + Pre-Agregación por (fecha_foto, moneda) antes de valuar FX\nWITH base_filtrada AS (\n    SELECT id_cliente, fecha_foto, moneda, SUM(monto_original) AS monto_dia\n    FROM pasivos.saldos_diarios_snapshot\n    WHERE fecha_foto BETWEEN DATE '2025-12-01' AND DATE '2025-12-31'\n      AND desc_producto NOT ILIKE '%TRANSITORIA%'\n      AND desc_producto NOT ILIKE '%GARANTIA%'\n    GROUP BY id_cliente, fecha_foto, moneda\n)\nSELECT * FROM base_filtrada;",
+      "resourceImpact": "Comprime la cardinalidad antes de los `JOINs` costosos y previene filtraciones silenciosas de cuentas contables internas."
+    },
+    {
+      "id": "CODEX-07",
+      "title": "Vectorización ETL en Python (np.select, merge_asof y tracemalloc)",
+      "category": "Python Data Engineering",
+      "tech": "Python (Pandas / NumPy)",
+      "difficulty": "Staff",
+      "tags": ["data-engineering", "python-etl", "fin-logic"],
+      "wikilinks": ["[[Vectorización ETL en Python]]", "[[LOCF con LEFT JOIN LATERAL]]", "[[Álgebra de Intervalos]]"],
+      "summary": "En Python, los bucles `.iterrows()`, `.itertuples()` y `.apply(axis=1)` ejecutan código en la máquina virtual de Python fila por fila, desencadenando miles de asignaciones de memoria. El código de producción bancario delega el trabajo a arreglos contiguos en C mediante `numpy` (`np.where`, `np.select`, `np.maximum`) y `pd.merge_asof`.",
+      "visualDiagram": ".iterrows() / .apply(axis=1): [Python Box/Unbox Fila 1] -> [Fila 2] -> ... (Lento, Alta RAM)\nVectorización NumPy / Pandas: [Buffer Contiguo float64 en C: SIMD AVX-512 en bloque] (100x más rápido)",
+      "antiPatternCode": "# ANTI-PATTERN: .apply(axis=1) instancia una Serie por fila\ndf['monto_usd'] = df.apply(\n    lambda r: r['monto'] * r['tasa_eur'] if r['moneda'] == 'EUR' else r['monto'],\n    axis=1\n)",
+      "optimizedCode": "# OPTIMIZADO: Vectorización SIMD con np.select y LOCF con pd.merge_asof\nconds = [df['moneda'] == 'USD', df['moneda'] == 'EUR', df['moneda'] == 'COP']\nchoices = [df['monto'], df['monto'] * df['tasa_eur'], df['monto'] * df['tasa_cop']]\ndf['monto_usd'] = np.select(conds, choices, default=0.0)",
+      "resourceImpact": "Reduce el pico de memoria medido con `tracemalloc` en más de 80% y acelera transformaciones de millones de filas de minutos a milisegundos."
+    },
+    {
+      "id": "CODEX-08",
+      "title": "Query Folding en Power Query (M) y Rolling Joins en R (data.table)",
+      "category": "BI & Cross-Stack Optimization",
+      "tech": "Power Query (M) / R (data.table)",
+      "difficulty": "Principal",
+      "tags": ["data-engineering", "sql-optimization", "power-query", "r-datatable"],
+      "wikilinks": ["[[Pre-Agregación]]", "[[LOCF con LEFT JOIN LATERAL]]", "[[Predicados Sargables]]"],
+      "summary": "Los mismos principios algorítmicos gobiernan **Power BI (Power Query M)** y **R (`data.table`)**:\n- En **Power Query**, filtrar rangos nativos (`Table.SelectRows`) y agrupar (`Table.Group`) *antes* de crear columnas personalizadas mantiene vivo el **Query Folding** (traducción automática a SQL en el servidor).\n- En **R (`data.table`)**, el join `tasas[saldos, on = .(fecha), roll = Inf]` resuelve el LOCF en C sin copiar memoria.",
+      "visualDiagram": "POWER QUERY (M) - ORDEN QUE PRESERVA EL QUERY FOLDING:\nOrigen SQL -> Table.SelectRows (Rango Fechas) -> Table.Group (Pre-Agregación) -> Cálculos Finales\n\nR (data.table) - ROLLING JOIN LOCF EN MEMORIA:\ntasas_validas <- tasas[tasa_eur_usd > 0]\nsetkey(tasas_validas, fecha_tasa)\nresultado <- tasas_validas[saldos, on = .(fecha_tasa = fecha_foto), roll = Inf]",
+      "antiPatternCode": "// ANTI-PATTERN en Power Query (M): Rompe el Query Folding al llamar Table.SelectRows por cada fila\n= Table.AddColumn(SaldosFiltrados, \"TasaLOCF\", each\n    List.First(Table.Sort(Table.SelectRows(Tasas, (t) => t[fecha_tasa] <= [fecha_foto]), {{\"fecha_tasa\", Order.Descending}})[tasa_eur_usd])\n)",
+      "optimizedCode": "// OPTIMIZADO en Power Query (M): Pre-agrega por fecha y delega el rango al motor (Query Folding activo)\nlet\n     RangoSargable = Table.SelectRows(Saldos, each [fecha_foto] >= #date(2025,12,1) and [fecha_foto] <= #date(2025,12,31)\n        and not Text.Contains([desc_producto], \"TRANSITORIA\") and not Text.Contains([desc_producto], \"GARANTIA\")),\n    PreAgregado = Table.Group(RangoSargable, {\"id_cliente\", \"moneda\"}, {\n        {\"SaldoPromedioMes\", each List.Sum([monto_original]) / 31.0, type number}\n    })\nin\n    PreAgregado",
+      "resourceImpact": "Evita que Power BI Desktop o el Gateway colapsen por *Out-Of-Memory* durante la actualización del modelo semántico y acelera R `data.table` a velocidad nativa de C."
+    }
+  ]
+}

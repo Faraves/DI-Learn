@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <rect width="192" height="192" rx="36" fill="#0B0F17"/>
+  <rect x="8" y="8" width="176" height="176" rx="30" fill="none" stroke="#10B981" stroke-width="4" stroke-opacity="0.4"/>
+  <path d="M40 132 L72 96 L98 116 L148 56" fill="none" stroke="#10B981" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="148" cy="56" r="8" fill="#34D399"/>
+  <rect x="40" y="144" width="112" height="10" rx="5" fill="#1E293B"/>
+  <rect x="40" y="144" width="84" height="10" rx="5" fill="#3B82F6"/>
+  <text x="40" y="68" font-family="monospace" font-weight="bold" font-size="28" fill="#F8FAFC">DOJO</text>
+</svg>
