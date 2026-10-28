@@ -4,7 +4,7 @@
  * Stores App Shell, Challenge Catalog, Evaluator Python AST script, and WebAssembly binaries (DuckDB-Wasm & Pyodide).
  */
 
-const CACHE_VERSION = 'datadojo-v1.2.0';
+const CACHE_VERSION = 'datadojo-v1.3.0';
 const APP_SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const WASM_CDN_CACHE = `${CACHE_VERSION}-wasm-cdn`;
 

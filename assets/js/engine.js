@@ -14,7 +14,7 @@
 (function (global) {
   'use strict';
 
-  const STORAGE_KEY = 'datadojo_state_v1';
+  const STORAGE_KEY = 'datadojo_state_v2';
   const IDB_NAME = 'DataDojoDB';
   const IDB_STORE = 'user_progress';
 
@@ -376,21 +376,28 @@
   async function transpileSqlForDuckDB(sqlText, tech) {
     let transformed = sqlText.trim().replace(/;+\s*$/, '');
 
-    // Fast deterministic Oracle SQL normalization (handles DECODE, NVL, TRUNC, TO_DATE, FETCH FIRST, ROWNUM)
-    if (tech === 'oracle' || /\b(?:NVL|DECODE|TO_DATE|TRUNC|FETCH\s+FIRST)\b/i.test(transformed)) {
-      // 1. TRUNC(col, 'MM') -> DATE_TRUNC('month', CAST(col AS DATE))
+    // Fast deterministic Oracle SQL normalization (handles DECODE, NVL, TRUNC, LAST_DAY, TO_DATE, FROM DUAL, FETCH FIRST)
+    if (tech === 'oracle' || /\b(?:NVL|DECODE|TO_DATE|TRUNC|LAST_DAY|FETCH\s+FIRST|DUAL)\b/i.test(transformed)) {
+      // 1. TRUNC(col, 'MM') -> CAST(DATE_TRUNC('month', CAST(col AS DATE)) AS DATE)
       transformed = transformed.replace(
         /\bTRUNC\s*\(\s*([^,]+?)\s*,\s*'(?:MM|MON|MONTH)'\s*\)/gi,
-        "DATE_TRUNC('month', CAST($1 AS DATE))"
+        "CAST(DATE_TRUNC('month', CAST($1 AS DATE)) AS DATE)"
       );
-      // 2. TO_DATE('2025-12-31', 'YYYY-MM-DD') -> CAST('2025-12-31' AS DATE)
+      // 2. LAST_DAY(col) -> CAST(LAST_DAY(CAST(col AS DATE)) AS DATE)
+      transformed = transformed.replace(
+        /\bLAST_DAY\s*\(\s*([^)]+?)\s*\)/gi,
+        'CAST(LAST_DAY(CAST($1 AS DATE)) AS DATE)'
+      );
+      // 3. TO_DATE('2025-12-31', 'YYYY-MM-DD') -> CAST('2025-12-31' AS DATE)
       transformed = transformed.replace(
         /\bTO_DATE\s*\(\s*('[^']+')\s*,\s*'[^']+'\s*\)/gi,
         'CAST($1 AS DATE)'
       );
-      // 3. NVL(a, b) -> COALESCE(a, b)
+      // 4. NVL(a, b) -> COALESCE(a, b)
       transformed = transformed.replace(/\bNVL\s*\(/gi, 'COALESCE(');
-      // 4. DECODE(expr, search, result, default) -> CASE WHEN expr = search THEN result ELSE default END
+      // 5. FROM DUAL -> omit for DuckDB scalar subquery compatibility
+      transformed = transformed.replace(/\bFROM\s+DUAL\b/gi, '');
+      // 6. DECODE(expr, search, result, default) -> CASE WHEN expr = search THEN result ELSE default END
       transformed = replaceOracleDecode(transformed);
     }
 
@@ -507,8 +514,35 @@
     }
 
     if (tech === 'python') {
+      const cleanPy = code.replace(/#[^\n]*/g, '');
+
+      // DRY Check 1: Magic calendar day divisor (/ 31, / 31.0, / 30, / 30.0)
+      if (/\/\s*(?:31|30|28|29)(?:\.0+)?\b/.test(cleanPy)) {
+        addAlert({
+          code: 'HARDCODED_MAGIC_DAYS',
+          severity: 'critical',
+          title: 'Anti-Pattern DRY en Python: Divisor de Días Fijo (/ 31.0)',
+          message:
+            'Estás dividiendo entre un número mágico fijo (/ 31.0). Calcula los días del mes dinámicamente a partir de fecha_base: `ini_mes = fecha_base.replace(day=1)`, `fin_mes = ini_mes + pd.offsets.MonthEnd(1)` y `dias_mes = float(fin_mes.day)`.',
+          wikilink: '[[Parametrización Dinámica DRY]]'
+        });
+      }
+
+      // DRY Check 2: Repeated hardcoded date literals
+      const pyDates = cleanPy.match(/['"]202\d-\d{2}-\d{2}['"]/g) || [];
+      if (pyDates.length > 1) {
+        addAlert({
+          code: 'HARDCODED_REPEATED_DATES',
+          severity: 'critical',
+          title: `Violación DRY en Python: ${pyDates.length} Fechas Literales Quemadas`,
+          message:
+            'Define `fecha_base = pd.Timestamp(\'2025-12-01\')` una única vez al inicio de la función y deriva dinámicamente `ini_mes`, `fin_mes` (`pd.offsets.MonthEnd(1)`) y `dias_mes`.',
+          wikilink: '[[Parametrización Dinámica DRY]]'
+        });
+      }
+
       // Instant JS Python AST checks
-      if (/\.\s*(?:iterrows|itertuples)\s*\(/.test(code)) {
+      if (/\.\s*(?:iterrows|itertuples)\s*\(/.test(cleanPy)) {
         addAlert({
           code: 'PYTHON_ITERROWS_ANTIPATTERN',
           severity: 'critical',
@@ -518,7 +552,7 @@
           wikilink: '[[Vectorización ETL en Python]]'
         });
       }
-      if (/\.apply\s*\([\s\S]*?axis\s*=\s*(?:1|['"]columns['"])/.test(code)) {
+      if (/\.apply\s*\([\s\S]*?axis\s*=\s*(?:1|['"]columns['"])/.test(cleanPy)) {
         addAlert({
           code: 'PYTHON_APPLY_AXIS1_ANTIPATTERN',
           severity: 'critical',
@@ -528,7 +562,7 @@
           wikilink: '[[Vectorización ETL en Python]]'
         });
       }
-      if (/fecha_vencimiento['"]\]\)\s*>=\s*fin_mes/.test(code)) {
+      if (/fecha_vencimiento['"]\]\)\s*>=\s*fin_mes/.test(cleanPy)) {
         addAlert({
           code: 'HALF_OPEN_INTERVAL_BOUNDARY_BUG',
           severity: 'critical',
@@ -552,8 +586,35 @@
       return alerts;
     }
 
-    // SQL Anti-Pattern Rules (PostgreSQL & Oracle SQL)
-    const upper = code.toUpperCase();
+    // Strip SQL comments before checking literals & AST rules
+    const cleanSql = code.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+    const upper = cleanSql.toUpperCase();
+
+    // 0A. DRY Check: Magic calendar day divisor (/ 31, / 31.0, / 30, / 30.0, / 28, / 29)
+    if (/\/\s*(?:31|30|28|29)(?:\.0+)?\b/.test(cleanSql)) {
+      addAlert({
+        code: 'HARDCODED_MAGIC_DAYS',
+        severity: 'critical',
+        title: 'Anti-Pattern DRY: Divisor de Días Calendario Quemado (/ 31 o / 30)',
+        message:
+          'Estás dividiendo entre un número mágico fijo (`/ 31.0` o `/ 30.0`). Define `fecha_base` una sola vez en un CTE `params`, calcula dinámicamente `dias_mes = (fin_mes - ini_mes + 1)` y divide entre `p.dias_mes`.',
+        wikilink: '[[Parametrización Dinámica DRY]]'
+      });
+    }
+
+    // 0B. DRY Check: Repeated Hardcoded Date Literals ('YYYY-MM-DD')
+    const sqlDates = cleanSql.match(/'202\d-\d{2}-\d{2}'/g) || [];
+    const maxAllowedDates = challengeId === 'CH-06' ? 4 : 1;
+    if (sqlDates.length > maxAllowedDates) {
+      addAlert({
+        code: 'HARDCODED_REPEATED_DATES',
+        severity: 'critical',
+        title: `Violación DRY: ${sqlDates.length} Fechas Literales Quemadas en la Consulta`,
+        message:
+          `Se detectaron ${sqlDates.length} fechas literales repartidas en el código. Define \`fecha_base\` **una única vez** en el CTE inicial \`params\` (${maxAllowedDates} fecha base por periodo), deriva dinámicamente \`ini_mes\`, \`fin_mes\` (\`LAST_DAY\`) y \`dias_mes\`, y referencia \`p.ini_mes\` y \`p.fin_mes\` en toda la consulta.`,
+        wikilink: '[[Parametrización Dinámica DRY]]'
+      });
+    }
 
     // 1. Non-Sargable Predicate in WHERE
     if (

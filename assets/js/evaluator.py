@@ -6,6 +6,7 @@ Runs 100% Client-Side inside Pyodide (WebAssembly).
 Uses:
 - `sqlglot` for PostgreSQL & Oracle SQL AST parsing, anti-pattern auditing, and transpilation to DuckDB.
 - `ast` & `tracemalloc` & `pandas` for Python ETL AST inspection, memory profiling, and Golden Dataset verification.
+- Enforces DRY Dynamic Parameterization (`WITH params AS (...)` in SQL, single `fecha_base` in Python/M/R).
 """
 
 import ast
@@ -13,7 +14,7 @@ import json
 import re
 import time
 import tracemalloc
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 try:
     import sqlglot
@@ -31,27 +32,34 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. ORACLE SQL -> DUCKDB TRANSPILER (WITH SQLGLOT + REGEX FALLBACK ENHANCEMENTS)
+# 1. ORACLE SQL -> DUCKDB TRANSPILER (WITH SQLGLOT + REGEX PREPROCESSOR)
 # ==============================================================================
 
 def preprocess_oracle_sql(sql_text: str) -> str:
     """
-    Normalizes common Oracle SQL idioms before passing to sqlglot or DuckDB so that
-    Oracle constructs like TRUNC(d, 'MM'), NVL, DECODE, TO_DATE, and ROWNUM transpile cleanly.
+    Normalizes Oracle SQL idioms (TRUNC, LAST_DAY, TO_DATE, NVL, DECODE, FROM DUAL)
+    so dynamic parameter CTEs (`WITH params AS (...)`) and queries transpile cleanly to DuckDB.
     """
     cleaned = sql_text.strip().rstrip(";")
 
-    # Convert Oracle TRUNC(expr, 'MM') or TRUNC(expr, 'MONTH') -> DATE_TRUNC('month', CAST(expr AS DATE))
+    # Convert Oracle TRUNC(expr, 'MM') or TRUNC(expr, 'MONTH') -> CAST(DATE_TRUNC('month', CAST(expr AS DATE)) AS DATE)
     cleaned = re.sub(
         r"\bTRUNC\s*\(\s*([^,]+?)\s*,\s*'(?:MM|MON|MONTH)'\s*\)",
-        r"DATE_TRUNC('month', CAST(\1 AS DATE))",
+        r"CAST(DATE_TRUNC('month', CAST(\1 AS DATE)) AS DATE)",
         cleaned,
         flags=re.IGNORECASE,
     )
-    # Convert Oracle TRUNC(expr, 'YYYY') -> DATE_TRUNC('year', CAST(expr AS DATE))
+    # Convert Oracle TRUNC(expr, 'YYYY') -> CAST(DATE_TRUNC('year', CAST(expr AS DATE)) AS DATE)
     cleaned = re.sub(
         r"\bTRUNC\s*\(\s*([^,]+?)\s*,\s*'(?:YYYY|YY|YEAR)'\s*\)",
-        r"DATE_TRUNC('year', CAST(\1 AS DATE))",
+        r"CAST(DATE_TRUNC('year', CAST(\1 AS DATE)) AS DATE)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    # Convert Oracle LAST_DAY(expr) -> CAST(LAST_DAY(CAST(expr AS DATE)) AS DATE)
+    cleaned = re.sub(
+        r"\bLAST_DAY\s*\(\s*([^)]+?)\s*\)",
+        r"CAST(LAST_DAY(CAST(\1 AS DATE)) AS DATE)",
         cleaned,
         flags=re.IGNORECASE,
     )
@@ -69,7 +77,7 @@ def preprocess_oracle_sql(sql_text: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
-    # Convert FROM DUAL -> omit or (SELECT 1)
+    # Convert FROM DUAL -> omit for DuckDB scalar subquery compatibility
     cleaned = re.sub(
         r"\bFROM\s+DUAL\b",
         "",
@@ -82,7 +90,6 @@ def preprocess_oracle_sql(sql_text: str) -> str:
 def transpile_to_duckdb(sql_text: str, dialect: str = "postgres") -> Dict[str, Any]:
     """
     Transpiles PostgreSQL or Oracle SQL into valid DuckDB SQL using sqlglot.
-    Returns { "success": bool, "duckdb_sql": str, "ast_valid": bool, "error": str | None }
     """
     source_dialect = "oracle" if dialect.lower().startswith("oracle") else "postgres"
     normalized_sql = preprocess_oracle_sql(sql_text) if source_dialect == "oracle" else sql_text.strip().rstrip(";")
@@ -104,7 +111,6 @@ def transpile_to_duckdb(sql_text: str, dialect: str = "postgres") -> Dict[str, A
                     "error": None,
                 }
         except Exception as exc:
-            # Fallback attempt with generic read dialect if Oracle has mixed PG/ANSI constructs
             try:
                 transpiled_list = sqlglot.transpile(
                     normalized_sql,
@@ -138,56 +144,90 @@ def transpile_to_duckdb(sql_text: str, dialect: str = "postgres") -> Dict[str, A
 
 
 # ==============================================================================
-# 2. DETERMINISTIC SQL AST AUDITOR (SQLGLOT + STRUCTURAL RULES)
+# 2. DETERMINISTIC SQL AST AUDITOR (SQLGLOT + DRY PARAMETERIZATION RULES)
 # ==============================================================================
+
+def strip_sql_comments(sql_text: str) -> str:
+    """Removes -- single line and /* */ block comments before AST regex inspection."""
+    no_block = re.sub(r"/\*[\s\S]*?\*/", " ", sql_text)
+    no_line = re.sub(r"--[^\n]*", " ", no_block)
+    return no_line
+
 
 def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = "") -> List[Dict[str, str]]:
     """
     Analyzes a SQL query (PostgreSQL or Oracle SQL) and returns pedagogical alerts
-    if any of the 6 core financial/performance anti-patterns are detected.
+    for anti-patterns and violations of DRY Dynamic Parameterization.
     """
     alerts: List[Dict[str, str]] = []
-    upper_sql = sql_text.upper()
+    clean_sql = strip_sql_comments(sql_text)
+    upper_sql = clean_sql.upper()
 
-    # 1. NON-SARGABLE PREDICATES IN WHERE
-    # Check if date_trunc, EXTRACT, TO_CHAR, or TRUNC is applied to fecha_foto / fecha_tasa / fecha_corte in WHERE
+    # 0A. DRY DYNAMIC PARAMETERIZATION CHECK: Magic Divisor (/ 31, / 31.0, / 30, / 30.0, / 28, / 29)
+    if re.search(r"/\s*(?:31|30|28|29)(?:\.0+)?\b", clean_sql):
+        alerts.append({
+            "code": "HARDCODED_MAGIC_DAYS",
+            "severity": "critical",
+            "title": "Anti-Pattern DRY: Divisor de Días Calendario Quemado (/ 31 o / 30)",
+            "message": (
+                "Estás dividiendo entre un número mágico fijo (`/ 31.0` o `/ 30.0`). "
+                "Por buenas prácticas de arquitectura, define `fecha_base` una sola vez en un CTE `params`, "
+                "calcula dinámicamente `dias_mes = (fin_mes - ini_mes + 1)` y divide entre `p.dias_mes`."
+            ),
+            "wikilink": "[[Parametrización Dinámica DRY]]",
+        })
+
+    # 0B. DRY DYNAMIC PARAMETERIZATION CHECK: Repeated Hardcoded Date Literals ('YYYY-MM-DD')
+    date_literals = re.findall(r"'202\d-\d{2}-\d{2}'", clean_sql)
+    max_allowed_dates = 4 if challenge_id == "CH-06" else 1
+    if len(date_literals) > max_allowed_dates:
+        alerts.append({
+            "code": "HARDCODED_REPEATED_DATES",
+            "severity": "critical",
+            "title": f"Violación DRY: {len(date_literals)} Fechas Literales Quemadas en la Consulta",
+            "message": (
+                f"Se detectaron {len(date_literals)} fechas quemadas ({', '.join(date_literals[:4])}) repartidas en el código. "
+                f"Debes definir la fecha objetivo **una única vez** ({max_allowed_dates} fecha por periodo en el CTE inicial `params`) "
+                "y derivar dinámicamente `ini_mes`, `fin_mes` (`LAST_DAY`) y `dias_mes`, referenciando `p.ini_mes` y `p.fin_mes` en toda la consulta."
+            ),
+            "wikilink": "[[Parametrización Dinámica DRY]]",
+        })
+
+    # 1. NON-SARGABLE PREDICATES IN WHERE (Applying functions to table date columns in WHERE)
     non_sargable_pattern = re.compile(
         r"\bWHERE\b[\s\S]*?\b(?:DATE_TRUNC|EXTRACT|TO_CHAR|TRUNC|YEAR|MONTH)\s*\([^)]*?\b(?:fecha_foto|fecha_tasa|fecha_corte|fecha_apertura|fecha_vencimiento)\b",
         re.IGNORECASE,
     )
-    if non_sargable_pattern.search(sql_text):
+    if non_sargable_pattern.search(clean_sql):
         alerts.append({
             "code": "NON_SARGABLE_PREDICATE",
             "severity": "critical",
             "title": "Predicado Non-Sargable detectado en cláusula WHERE",
             "message": (
-                "Estás envolviendo una columna de fecha (ej. `fecha_foto` o `fecha_corte`) dentro de una función "
-                "(`DATE_TRUNC`, `EXTRACT`, `TO_CHAR` o `TRUNC`) en el `WHERE`. Esto impide el uso de índices B-Tree "
-                "y Zone Maps (Partition Pruning), forzando un Full Table Scan fila por fila. "
-                "Usa rangos explícitos: `fecha_foto BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'`."
+                "Estás envolviendo una columna de tabla (`fecha_foto`, `fecha_corte`, etc.) dentro de una función "
+                "(`DATE_TRUNC`, `EXTRACT`, `TO_CHAR` o `TRUNC`) en el `WHERE`. Esto anula los índices B-Tree "
+                "y Zone Maps. Calcula `p.ini_mes` y `p.fin_mes` en el CTE `params` y filtra con `fecha_foto BETWEEN p.ini_mes AND p.fin_mes`."
             ),
             "wikilink": "[[Predicados Sargables]]",
         })
 
     # 2. TRAMPA DEL AVG() BANCARIO
-    # Using AVG(monto...) or AVG(CASE ... ELSE 0 END) or AVG(NVL(...)) instead of SUM(...) / dias_calendario
-    if re.search(r"\bAVG\s*\(", sql_text, re.IGNORECASE):
+    if re.search(r"\bAVG\s*\(", clean_sql, re.IGNORECASE):
         alerts.append({
             "code": "BANKING_AVG_TRAP",
             "severity": "critical",
             "title": "Trampa del AVG() Bancario en Saldos Promedios",
             "message": (
-                "Detectado uso de `AVG()` directo sobre filas. En banca, una cuenta abierta a mitad de mes o sin "
-                "fotos en días con saldo cero tendrá menos de 30/31 registros, por lo que `AVG(monto)` dividirá entre "
-                "las filas presentes (ej. 10) e inflará artificialmente el saldo promedio. "
-                "Regla de oro: `SUM(monto) / dias_calendario_del_mes` (30 o 31)."
+                "Detectado uso de `AVG()` directo sobre filas. En banca, una cuenta abierta a mitad de mes "
+                "tendrá menos registros físicos y `AVG(monto)` inflará el promedio. "
+                "Regla de oro: `SUM(monto) / p.dias_mes`."
             ),
             "wikilink": "[[Trampa del AVG Bancario]]",
         })
 
     # 3. EXPLOSIÓN DE RAM EN INTERVALOS (generate_series on interval deposits)
-    if re.search(r"\bGENERATE_SERIES\s*\(", sql_text, re.IGNORECASE) and re.search(
-        r"\bdepositos_vigencia_intervalo\b", sql_text, re.IGNORECASE
+    if re.search(r"\bGENERATE_SERIES\s*\(", clean_sql, re.IGNORECASE) and re.search(
+        r"\bdepositos_vigencia_intervalo\b", clean_sql, re.IGNORECASE
     ):
         alerts.append({
             "code": "INTERVAL_RAM_EXPLOSION",
@@ -195,25 +235,24 @@ def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = 
             "title": "Explosión de RAM por Expansión Diaria con generate_series()",
             "message": (
                 "Desglosar contratos de `depositos_vigencia_intervalo` día por día mediante `generate_series` multiplica "
-                "la cardinalidad por 365x y satura la memoria RAM (O(N×D)). Calcula la intersección de días activos "
-                "en tiempo constante O(1) con Álgebra de Intervalos: "
-                "`GREATEST(0, (LEAST(fecha_vencimiento - 1, fin_mes) - GREATEST(fecha_apertura, ini_mes)) + 1)`."
+                "la cardinalidad por 365x y satura la RAM. Calcula la intersección en O(1) con Álgebra de Intervalos: "
+                "`GREATEST(0, (LEAST(d.fecha_vencimiento - INTERVAL '1 day', p.fin_mes)::DATE - GREATEST(d.fecha_apertura, p.ini_mes)::DATE) + 1)`."
             ),
             "wikilink": "[[Álgebra de Intervalos]]",
         })
 
-    # Check half-open interval boundary mistake: fecha_vencimiento >= '2025-12-31' for closing balance
-    if re.search(r"\bdepositos_vigencia_intervalo\b", sql_text, re.IGNORECASE):
-        if re.search(r"fecha_vencimiento\s*>=\s*(?:'202\d-\d{2}-\d{2}'|fin_mes|fecha_cierre)", sql_text, re.IGNORECASE):
+    # Check half-open interval boundary mistake: fecha_vencimiento >= fin_mes
+    if re.search(r"\bdepositos_vigencia_intervalo\b", clean_sql, re.IGNORECASE):
+        if re.search(r"fecha_vencimiento\s*>=\s*(?:'202\d-\d{2}-\d{2}'|p\.fin_mes|fin_mes|fecha_cierre)", clean_sql, re.IGNORECASE):
             alerts.append({
                 "code": "HALF_OPEN_INTERVAL_BOUNDARY_BUG",
-                "severity": "warning",
+                "severity": "critical",
                 "title": "Error de Frontera en Intervalo Semiabierto [apertura, vencimiento)",
                 "message": (
                     "En `depositos_vigencia_intervalo`, `fecha_vencimiento` es el día en que vence el certificado "
-                    "(último día activo real = `fecha_vencimiento - 1`). Usar `fecha_vencimiento >= fecha_cierre` "
-                    "incluye erróneamente contratos que ya vencieron ese día o duplica renovaciones del día 15. "
-                    "Para saldo puntual al cierre usa `fecha_apertura <= fecha_cierre AND fecha_vencimiento > fecha_cierre`."
+                    "(último día activo real = `fecha_vencimiento - 1`). Usar `fecha_vencimiento >= p.fin_mes` "
+                    "incluye erróneamente contratos que ya vencieron ese día. "
+                    "Para saldo puntual al cierre usa `d.fecha_apertura <= p.fin_mes AND d.fecha_vencimiento > p.fin_mes`."
                 ),
                 "wikilink": "[[Snapshots vs Intervalos Semiabiertos]]",
             })
@@ -223,21 +262,19 @@ def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = 
         r"\bNOT\s+I?LIKE\s+'[^']+'\s+OR\s+(?:\w+\.)?desc_producto\s+NOT\s+I?LIKE\b",
         re.IGNORECASE,
     )
-    if broken_demorgan.search(sql_text):
+    if broken_demorgan.search(clean_sql):
         alerts.append({
             "code": "BROKEN_BOOLEAN_LOGIC",
             "severity": "critical",
             "title": "Violación de las Leyes de De Morgan (NOT ILIKE ... OR NOT ILIKE ...)",
             "message": (
-                "Combinar dos exclusiones `NOT ILIKE '%A%' OR NOT ILIKE '%B%'` evalúa a `TRUE` para absolutamente "
-                "todas las filas (porque ningún producto es simultáneamente '%A%' y '%B%'). "
-                "Para excluir múltiples patrones debes usar conjunción lógica: `NOT ILIKE '%A%' AND NOT ILIKE '%B%'`."
+                "Combinar dos exclusiones `NOT ILIKE '%A%' OR NOT ILIKE '%B%'` evalúa a `TRUE` para todas las filas. "
+                "Para excluir múltiples patrones usa `NOT ILIKE '%A%' AND NOT ILIKE '%B%'`."
             ),
             "wikilink": "[[Leyes de De Morgan en SQL]]",
         })
 
-    # 5. FALTA DE PRE-AGREGACIÓN (Late Aggregation on FX or CRM joins)
-    # Detect if joining saldos_diarios_snapshot directly with tasas_cambio_oficial without pre-aggregating or filtering
+    # 5. FX INNER JOIN & MISSING ZERO GUARD
     if (
         "SALDOS_DIARIOS_SNAPSHOT" in upper_sql
         and "TASAS_CAMBIO_OFICIAL" in upper_sql
@@ -249,13 +286,11 @@ def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = 
             "title": "Pérdida de Saldos de Fin de Semana por INNER JOIN con Tasas",
             "message": (
                 "`tesoreria.tasas_cambio_oficial` no tiene registros en sábados, domingos ni feriados. "
-                "Un `INNER JOIN` elimina ~30% de los saldos diarios del mes. Debes usar **LOCF (Last Observation Carried Forward)** "
-                "con `LEFT JOIN LATERAL (... WHERE t.fecha_tasa <= s.fecha_foto AND NULLIF(t.tasa, 0) IS NOT NULL ORDER BY t.fecha_tasa DESC LIMIT 1)`."
+                "Un `INNER JOIN` elimina ~30% de los saldos diarios del mes. Usa **LOCF** con `LEFT JOIN LATERAL`."
             ),
             "wikilink": "[[LOCF con LEFT JOIN LATERAL]]",
         })
 
-    # Check if tasas_cambio_oficial is queried without NULLIF or > 0 protection
     if "TASAS_CAMBIO_OFICIAL" in upper_sql:
         has_zero_guard = (
             "NULLIF" in upper_sql
@@ -266,22 +301,21 @@ def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = 
         if not has_zero_guard:
             alerts.append({
                 "code": "MISSING_ZERO_RATE_GUARD",
-                "severity": "warning",
+                "severity": "critical",
                 "title": "Riesgo de Tasa 0.00 sin protección NULLIF / Filtro > 0",
                 "message": (
                     "`tesoreria.tasas_cambio_oficial` contiene días trampa con tasa `0.00`. "
-                    "Asegúrate de filtrar `tasa > 0` o envolver la columna con `NULLIF(tasa, 0)` antes de dividir o arrastrar con LOCF."
+                    "Filtra `NULLIF(tasa, 0) IS NOT NULL` dentro de la búsqueda LOCF."
                 ),
                 "wikilink": "[[LOCF con LEFT JOIN LATERAL]]",
             })
 
-    # Check un-deduplicated join with crm.historico_segmento_cliente
+    # 6. CRM JOIN DUPLICATION
     if "HISTORICO_SEGMENTO_CLIENTE" in upper_sql:
         has_dedup = (
             "DISTINCT ON" in upper_sql
             or "ROW_NUMBER" in upper_sql
             or "KEEP" in upper_sql
-            or "MAX(" in upper_sql
             or "ARG_MAX" in upper_sql
         )
         if not has_dedup:
@@ -291,53 +325,22 @@ def audit_sql_ast(sql_text: str, dialect: str = "postgres", challenge_id: str = 
                 "title": "Duplicación de Saldos por JOIN 1:N con Histórico de Segmentos CRM",
                 "message": (
                     "`crm.historico_segmento_cliente` tiene múltiples registros en el mismo mes para clientes que "
-                    "cambiaron de segmento. Hacer `JOIN` directo multiplica sus saldos por 2x. "
-                    "Deduplica primero en un CTE con `DISTINCT ON (id_cliente) ... ORDER BY id_cliente, fecha_corte DESC`."
+                    "cambiaron de segmento. Deduplica primero con `DISTINCT ON (id_cliente) ... WHERE fecha_corte <= p.fin_mes ORDER BY id_cliente, fecha_corte DESC`."
                 ),
                 "wikilink": "[[Deduplicación con DISTINCT ON]]",
             })
 
-    # 6. UNION ASYMMETRY OR EXPENSIVE UNION (SORT DEDUP) INSTEAD OF UNION ALL
-    if re.search(r"\bUNION\b(?!\s+ALL\b)", sql_text, re.IGNORECASE):
+    # 7. UNION WITHOUT ALL
+    if re.search(r"\bUNION\b(?!\s+ALL\b)", clean_sql, re.IGNORECASE):
         alerts.append({
             "code": "UNION_WITHOUT_ALL",
             "severity": "warning",
             "title": "Uso de UNION en lugar de UNION ALL (Sort innecesario)",
             "message": (
-                "`UNION` sin `ALL` fuerza al motor SQL a ordenar y deduplicar todas las filas consolidadas, "
-                "consumiendo CPU y memoria adicional y pudiendo eliminar registros legítimos con montos idénticos. "
-                "Usa siempre `UNION ALL` al consolidar tablas de pasivos."
+                "`UNION` sin `ALL` fuerza un Sort/Dedup innecesario. Usa siempre `UNION ALL` al consolidar pasivos pre-agregados."
             ),
             "wikilink": "[[Pre-Agregación]]",
         })
-
-    # Additional AST checks via sqlglot when available
-    if HAS_SQLGLOT:
-        try:
-            read_dialect = "oracle" if dialect.lower().startswith("oracle") else "postgres"
-            parsed = sqlglot.parse_one(
-                preprocess_oracle_sql(sql_text) if read_dialect == "oracle" else sql_text,
-                read=read_dialect,
-            )
-            # Check for UNION ALL column count symmetry
-            for union_node in parsed.find_all(exp.Union):
-                left_select = union_node.left
-                right_select = union_node.right
-                if isinstance(left_select, exp.Select) and isinstance(right_select, exp.Select):
-                    if len(left_select.expressions) != len(right_select.expressions):
-                        alerts.append({
-                            "code": "UNION_COLUMN_MISMATCH",
-                            "severity": "critical",
-                            "title": "Insimetría de Columnas en UNION ALL",
-                            "message": (
-                                f"El bloque izquierdo proyecta {len(left_select.expressions)} columnas pero el bloque "
-                                f"derecho proyecta {len(right_select.expressions)} columnas. Ambos bloques deben estar "
-                                "estrictamente alineados en cantidad y tipo de datos."
-                            ),
-                            "wikilink": "[[Pre-Agregación]]",
-                        })
-        except Exception:
-            pass
 
     return alerts
 
@@ -351,7 +354,7 @@ def audit_python_ast(py_code: str) -> List[Dict[str, str]]:
     Uses Python's native `ast` module to inspect user ETL scripts for anti-patterns:
     - `.iterrows()` or `.itertuples()`
     - `.apply(..., axis=1)`
-    - Explicit `for` loops mutating or accumulating rows over DataFrames
+    - Hardcoded magic divisors (`/ 31.0`, `/ 30.0`) or repeated hardcoded date strings
     """
     alerts: List[Dict[str, str]] = []
     try:
@@ -366,8 +369,38 @@ def audit_python_ast(py_code: str) -> List[Dict[str, str]]:
         })
         return alerts
 
+    # Remove comments for regex inspection of literals
+    no_comments = re.sub(r"#[^\n]*", "", py_code)
+
+    # Check DRY Dynamic Parameterization in Python
+    if re.search(r"/\s*(?:31|30|28|29)(?:\.0+)?\b", no_comments):
+        alerts.append({
+            "code": "HARDCODED_MAGIC_DAYS",
+            "severity": "critical",
+            "title": "Anti-Pattern DRY en Python: Divisor de Días Fijo (/ 31.0)",
+            "message": (
+                "Estás dividiendo entre `31.0` quemado en código. Deriva dinámicamente los días del mes "
+                "a partir de `fecha_base`: `ini_mes = fecha_base.replace(day=1)`, "
+                "`fin_mes = ini_mes + pd.offsets.MonthEnd(1)` y `dias_mes = float(fin_mes.day)`."
+            ),
+            "wikilink": "[[Parametrización Dinámica DRY]]",
+        })
+
+    date_literals = re.findall(r"['\"]202\d-\d{2}-\d{2}['\"]", no_comments)
+    if len(date_literals) > 1:
+        alerts.append({
+            "code": "HARDCODED_REPEATED_DATES",
+            "severity": "critical",
+            "title": f"Violación DRY en Python: {len(date_literals)} Fechas Quemadas",
+            "message": (
+                f"Se encontraron {len(date_literals)} fechas literales ({', '.join(date_literals)}). "
+                "Define `fecha_base = pd.Timestamp('2025-12-01')` una única vez al inicio de la función "
+                "y calcula dinámicamente `ini_mes`, `fin_mes` (`pd.offsets.MonthEnd(1)`) y `dias_mes`."
+            ),
+            "wikilink": "[[Parametrización Dinámica DRY]]",
+        })
+
     for node in ast.walk(tree):
-        # Detect .iterrows() or .itertuples()
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             attr_name = node.func.attr
             if attr_name in ("iterrows", "itertuples"):
@@ -376,14 +409,12 @@ def audit_python_ast(py_code: str) -> List[Dict[str, str]]:
                     "severity": "critical",
                     "title": f"Anti-Pattern Crítico: Uso de `.{attr_name}()` en Pandas",
                     "message": (
-                        f"Iterar fila por fila con `.{attr_name}()` instancia objetos Series/tuplas en el intérprete "
-                        "de Python y es hasta 1,000x más lento que C/NumPy. Reemplázalo por operaciones vectorizadas "
-                        "(`np.maximum`, `np.minimum`, `np.select`, `pd.merge_asof`)."
+                        f"Iterar fila por fila con `.{attr_name}()` instancia objetos en Python y es 1,000x más lento. "
+                        "Usa operaciones vectorizadas (`np.maximum`, `np.minimum`, `np.where`, `np.select`, `pd.merge_asof`)."
                     ),
                     "wikilink": "[[Vectorización ETL en Python]]",
                 })
             elif attr_name == "apply":
-                # Check if axis=1 or axis='columns' is passed
                 has_axis_1 = any(
                     (kw.arg == "axis" and isinstance(kw.value, ast.Constant) and kw.value.value in (1, "columns"))
                     for kw in node.keywords
@@ -394,24 +425,11 @@ def audit_python_ast(py_code: str) -> List[Dict[str, str]]:
                         "severity": "critical",
                         "title": "Anti-Pattern de CPU/RAM: `.apply(..., axis=1)`",
                         "message": (
-                            "`.apply(axis=1)` ejecuta un bucle de Python disfrazado sobre cada fila del DataFrame, "
-                            "disparando el consumo de RAM y CPU. Usa aritmética de columnas vectorizada o `np.where` / `np.select`."
+                            "`.apply(axis=1)` ejecuta un bucle de Python sobre cada fila del DataFrame. "
+                            "Usa aritmética de columnas vectorizada o `np.where` / `np.select`."
                         ),
                         "wikilink": "[[Vectorización ETL en Python]]",
                     })
-
-    # Check if AVG/mean is used directly on sparse daily snapshots in Python
-    if ".mean(" in py_code and "saldos" in py_code:
-        alerts.append({
-            "code": "PYTHON_MEAN_TRAP",
-            "severity": "warning",
-            "title": "Cuidado con `.mean()` sobre Snapshots Diarios Dispersos",
-            "message": (
-                "En Pandas, `df.groupby(...)[col].mean()` divide entre el conteo de filas presentes y no entre "
-                "los días calendario del mes (30 o 31). Usa `.sum() / dias_mes`."
-            ),
-            "wikilink": "[[Trampa del AVG Bancario]]",
-        })
 
     return alerts
 
@@ -419,7 +437,6 @@ def audit_python_ast(py_code: str) -> List[Dict[str, str]]:
 def execute_python_etl(py_code: str, datasets_json: str) -> Dict[str, Any]:
     """
     Executes a user Python ETL script inside Pyodide with `tracemalloc` profiling.
-    The user script must define `def transform_pasivos(datasets): -> pd.DataFrame` (or `result_df`).
     """
     alerts = audit_python_ast(py_code)
     if any(a["code"] == "PYTHON_SYNTAX_ERROR" for a in alerts):
@@ -463,8 +480,7 @@ def execute_python_etl(py_code: str, datasets_json: str) -> Dict[str, Any]:
             result_df = sandbox_globals["result_df"]
         else:
             raise ValueError(
-                "Tu script debe definir la función `transform_pasivos(datasets)` que retorne un DataFrame de Pandas, "
-                "o asignar el resultado final a la variable `result_df`."
+                "Tu script debe definir la función `transform_pasivos(datasets)` que retorne un DataFrame de Pandas."
             )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -474,7 +490,6 @@ def execute_python_etl(py_code: str, datasets_json: str) -> Dict[str, Any]:
         if not isinstance(result_df, pd.DataFrame):
             raise TypeError("El resultado retornado no es un `pandas.DataFrame`.")
 
-        # Normalize dates & floats to JSON-friendly records
         out_df = result_df.copy()
         for col in out_df.columns:
             if pd.api.types.is_datetime64_any_dtype(out_df[col]):
